@@ -1,0 +1,2286 @@
+import React, { useState, useEffect } from 'react';
+import {
+  ThawingItem,
+  FabricationSegment,
+  DailyClosingReport,
+  LossAlertConfig,
+  Store,
+  UserAccount,
+  CogsMaster,
+  StockAdjustment,
+  ClosingPlanRecord,
+  GrnRecord,
+  ReportCategory,
+} from './types';
+import {
+  getStores,
+  saveStores,
+  getUsers,
+  saveUsers,
+  getCurrentUser,
+  setCurrentUser,
+  getCogsMaster,
+  saveCogsMaster,
+  normalizeCogsList,
+  getStockAdjustments,
+  saveStockAdjustments,
+  saveStockAdjustmentsLocally,
+  getClosingPlanRecords,
+  saveClosingPlanRecords,
+  saveClosingPlanRecordsLocally,
+  deleteClosingPlanRecord,
+  purgeDateRecords,
+  getThawingItems,
+  saveThawingItems,
+  saveThawingItemsLocally,
+  getFabricationSegments,
+  saveFabricationSegments,
+  saveFabricationSegmentsLocally,
+  getDailyReports,
+  saveDailyReports,
+  saveDailyReportsLocally,
+  deleteDailyReport,
+  deleteFabricationSegment,
+  getLossConfig,
+  saveLossConfig,
+  resetDatabase,
+  deduplicateThawingItems,
+  deduplicateDailyReports,
+  getGrnRecords,
+  saveGrnRecords,
+  deleteGrnRecord,
+} from './utils/db';
+import { matchStoreEntity, getEffectiveStore, isMatchPlan, getDeterministicClosingRecordId } from './utils/storeHelper';
+import { findHMinus1ClosingRecord, propagateClosingToNextDay, getNextDateStr } from './utils/dateUtils';
+
+// Primary views
+import Dashboard from './components/Dashboard';
+import AntrianPabrikasi from './components/AntrianPabrikasi';
+import SegmentasiPabrikasi from './components/SegmentasiPabrikasi';
+import UpdateSales from './components/UpdateSales';
+import Summary from './components/Summary';
+import RiwayatHarian from './components/RiwayatHarian';
+import ButcherClosingView from './components/ButcherClosingView';
+import HppCalculatorView from './components/HppCalculatorView';
+
+// Modals
+import TransferPurposeModal from './components/TransferPurposeModal';
+import EditRencanaPotongModal from './components/EditRencanaPotongModal';
+import AppsScriptDatabaseModal from './components/AppsScriptDatabaseModal';
+
+// Icons
+import {
+  LayoutDashboard,
+  Clock,
+  Scissors,
+  DollarSign,
+  TrendingDown,
+  FileSpreadsheet,
+  History,
+  RotateCcw,
+  Building2,
+  Compass,
+  Settings,
+  X,
+  Beef,
+  Menu,
+  LogOut,
+  Database,
+  CheckCircle2,
+  CheckSquare,
+  User,
+  Camera,
+  Calculator,
+  Percent
+} from 'lucide-react';
+
+// Helper to normalize user role regardless of casing ('MD_PUSAT', 'ADMIN_TOKO', 'md', 'admin', 'butcher')
+export function normalizeRole(role?: any): 'butcher' | 'admin' | 'md' {
+  if (!role) return 'butcher';
+  const r = String(role).toLowerCase().trim();
+  if (r.includes('md') || r.includes('merchandis') || r.includes('pusat')) {
+    return 'md';
+  }
+  if (r.includes('admin') || r.includes('toko') || r.includes('store')) {
+    return 'admin';
+  }
+  return 'butcher';
+}
+
+export const DEFAULT_BUTCHER_USER: UserAccount = {
+  id: 'user_butcher_1',
+  username: 'butcher',
+  role: 'butcher',
+  storeId: '1',
+  storeName: 'TDN CKR',
+  fullName: 'Petugas Butcher',
+  createdAt: new Date().toISOString(),
+};
+
+export default function App() {
+  // Simplified Butcher-Only Session
+  const [currentUser, setCurrentUserState] = useState<UserAccount>(DEFAULT_BUTCHER_USER);
+  const [isInitializing, setIsInitializing] = useState(false);
+
+  // Navigation active tab & Sidebar state
+  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
+  const [touchStartX, setTouchStartX] = useState<number | null>(null);
+  const [touchStartY, setTouchStartY] = useState<number | null>(null);
+
+  // Account & Store State
+  const [stores, setStores] = useState<Store[]>([]);
+  const [selectedStoreIdForMd, setSelectedStoreIdForMd] = useState<string>('1');
+  const [users, setUsers] = useState<UserAccount[]>([]);
+  const [showAccountModal, setShowAccountModal] = useState<boolean>(false);
+  const [showAppsScriptModal, setShowAppsScriptModal] = useState<boolean>(false);
+
+  // Operational Database State
+  const [cogsList, setCogsList] = useState<CogsMaster[]>([]);
+  const [adjustments, setAdjustments] = useState<StockAdjustment[]>([]);
+  const [closingRecords, setClosingRecords] = useState<ClosingPlanRecord[]>([]);
+  const [grnRecords, setGrnRecords] = useState<GrnRecord[]>([]);
+  const [activeReportCategory, setActiveReportCategory] = useState<ReportCategory>('DAGING');
+  const [items, setItems] = useState<ThawingItem[]>([]);
+  const [segments, setSegments] = useState<FabricationSegment[]>([]);
+  const [reports, setReports] = useState<DailyClosingReport[]>([]);
+  const [lossConfig, setLossConfig] = useState<LossAlertConfig>({
+    maxProcessLossPercent: 1.0,
+    maxSalesLossPercent: 1.0,
+    maxDailyLossPercent: 2.0,
+    safeThawingLossPercent: 1.0,
+    safeFabricationLossPercent: 1.0,
+    salesPredictionKg: 40.0,
+  });
+
+  // System State
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [backendConnected, setBackendConnected] = useState<boolean>(true);
+
+  // Modal states
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [isEditPlanModalOpen, setIsEditPlanModalOpen] = useState(false);
+  const [editPlanItemId, setEditPlanItemId] = useState<string | null>(null);
+
+  // New Store Form State (in Account Settings Modal)
+  const [newStoreCode, setNewStoreCode] = useState('');
+  const [newStoreName, setNewStoreName] = useState('');
+  const [newStoreCity, setNewStoreCity] = useState('');
+  const [newButcherName, setNewButcherName] = useState('');
+  const [newButcherPassword, setNewButcherPassword] = useState('butcher123');
+  const [newAdminName, setNewAdminName] = useState('');
+  const [newAdminPassword, setNewAdminPassword] = useState('admin123');
+  const [addStoreSuccess, setAddStoreSuccess] = useState(false);
+
+  // Initial Load from System API or local cache
+  const fetchAllData = async (silent = false) => {
+    if (!silent) setIsRefreshing(true);
+    try {
+      // Fetch from backend API / local cache
+      const [resStores, resUsers, resCogs, resItems, resSegs, resAdjs, resRecords, resReps, resGrn] = await Promise.all([
+        fetch('/api/stores').catch(() => null),
+        fetch('/api/users').catch(() => null),
+        fetch('/api/cogs').catch(() => null),
+        fetch('/api/thawing-items').catch(() => null),
+        fetch('/api/fabrication-segments').catch(() => null),
+        fetch('/api/adjustments').catch(() => null),
+        fetch('/api/closing-records').catch(() => null),
+        fetch('/api/reports').catch(() => null),
+        fetch('/api/grn').catch(() => null),
+      ]);
+
+      const isBackendLive = Boolean(resStores?.ok || resItems?.ok || resUsers?.ok);
+      setBackendConnected(isBackendLive);
+
+      if (resStores && resStores.ok) {
+        const data = await resStores.json();
+        if (Array.isArray(data) && data.length > 0) {
+          setStores(data);
+          setSelectedStoreIdForMd((prev) => {
+            if (data.some((s) => s.id === prev || matchStoreEntity(prev, s))) return prev;
+            return data[0].id;
+          });
+        }
+      } else {
+        const localStores = getStores();
+        setStores(localStores);
+        if (localStores.length > 0) {
+          setSelectedStoreIdForMd((prev) => {
+            if (localStores.some((s) => s.id === prev || matchStoreEntity(prev, s))) return prev;
+            return localStores[0].id;
+          });
+        }
+      }
+
+      if (resUsers && resUsers.ok) {
+        const data = await resUsers.json();
+        if (Array.isArray(data) && data.length > 0) setUsers(data);
+      } else {
+        setUsers(getUsers());
+      }
+
+      if (resCogs && resCogs.ok) {
+        const data = await resCogs.json();
+        if (Array.isArray(data) && data.length > 0) {
+          const normalized = normalizeCogsList(data);
+          setCogsList(normalized);
+        } else {
+          setCogsList(getCogsMaster());
+        }
+      } else {
+        setCogsList(getCogsMaster());
+      }
+
+      if (resItems && resItems.ok) {
+        const data = await resItems.json();
+        const serverList: ThawingItem[] = Array.isArray(data) ? data : [];
+        const localList: ThawingItem[] = getThawingItems();
+        const itemMap = new Map<string, ThawingItem>();
+        serverList.forEach((it) => { if (it && it.id) itemMap.set(it.id, it); });
+        localList.forEach((loc) => {
+          if (!loc || !loc.id) return;
+          if (!itemMap.has(loc.id)) {
+            itemMap.set(loc.id, loc);
+          } else {
+            const srv = itemMap.get(loc.id)!;
+            const lTime = new Date(loc.createdAt || loc.thawingStartTime || 0).getTime();
+            const sTime = new Date(srv.createdAt || srv.thawingStartTime || 0).getTime();
+            if (lTime >= sTime || (loc.status === 'pabrikasi_done' && srv.status !== 'pabrikasi_done')) {
+              itemMap.set(loc.id, { ...srv, ...loc });
+            }
+          }
+        });
+        const merged = deduplicateThawingItems(Array.from(itemMap.values()));
+        setItems(merged);
+        saveThawingItemsLocally(merged);
+      } else {
+        setItems(deduplicateThawingItems(getThawingItems()));
+      }
+
+      if (resSegs && resSegs.ok) {
+        const data = await resSegs.json();
+        const serverList: FabricationSegment[] = Array.isArray(data) ? data : [];
+        const localList: FabricationSegment[] = getFabricationSegments();
+        const segMap = new Map<string, FabricationSegment>();
+        serverList.forEach((s) => { if (s && s.id) segMap.set(s.id, s); });
+        localList.forEach((loc) => {
+          if (!loc || !loc.id) return;
+          if (!segMap.has(loc.id)) {
+            segMap.set(loc.id, loc);
+          } else {
+            const srv = segMap.get(loc.id)!;
+            segMap.set(loc.id, { ...srv, ...loc });
+          }
+        });
+        const merged = Array.from(segMap.values());
+        setSegments(merged);
+        saveFabricationSegmentsLocally(merged);
+      } else {
+        setSegments(getFabricationSegments());
+      }
+
+      if (resAdjs && resAdjs.ok) {
+        const data = await resAdjs.json();
+        const serverList: StockAdjustment[] = Array.isArray(data) ? data : [];
+        const localList: StockAdjustment[] = getStockAdjustments();
+        const adjMap = new Map<string, StockAdjustment>();
+        serverList.forEach((a) => { if (a && a.id) adjMap.set(a.id, a); });
+        localList.forEach((loc) => {
+          if (!loc || !loc.id) return;
+          if (!adjMap.has(loc.id)) adjMap.set(loc.id, loc);
+        });
+        const merged = Array.from(adjMap.values());
+        setAdjustments(merged);
+        saveStockAdjustmentsLocally(merged);
+      } else {
+        setAdjustments(getStockAdjustments());
+      }
+
+      if (resRecords && resRecords.ok) {
+        const data = await resRecords.json();
+        const local = getClosingPlanRecords();
+        const serverList: ClosingPlanRecord[] = Array.isArray(data) ? data : [];
+        const localList: ClosingPlanRecord[] = Array.isArray(local) ? local : [];
+
+        // Robust merge: server base with local updates taking priority, strictly matched by unique ID
+        const recordMap = new Map<string, ClosingPlanRecord>();
+        serverList.forEach((srv) => {
+          if (srv && srv.id) recordMap.set(srv.id, srv);
+        });
+
+        localList.forEach((loc) => {
+          if (!loc || !loc.id) return;
+          if (recordMap.has(loc.id)) {
+            const existing = recordMap.get(loc.id)!;
+            const locTime = new Date(loc.timestamp || 0).getTime();
+            const srvTime = new Date(existing.timestamp || 0).getTime();
+            const locActual = Number(loc.actualClosingStockKg || 0);
+            const srvActual = Number(existing.actualClosingStockKg || 0);
+
+            if (locTime >= srvTime || (locActual > 0 && srvActual === 0) || (loc.photoUrl && !existing.photoUrl)) {
+              recordMap.set(loc.id, { ...existing, ...loc });
+            } else {
+              recordMap.set(loc.id, {
+                ...loc,
+                ...existing,
+                photoUrl: existing.photoUrl || loc.photoUrl || '',
+                note: existing.note || loc.note || '',
+              });
+            }
+          } else {
+            recordMap.set(loc.id, loc);
+          }
+        });
+
+        const filtered = Array.from(recordMap.values());
+        setClosingRecords(filtered);
+        if (filtered.length > 0) {
+          saveClosingPlanRecordsLocally(filtered);
+        }
+      } else {
+        setClosingRecords(getClosingPlanRecords());
+      }
+
+      if (resReps && resReps.ok) {
+        const data = await resReps.json();
+        const serverList: DailyClosingReport[] = Array.isArray(data) ? data : [];
+        const localList: DailyClosingReport[] = getDailyReports();
+        const repMap = new Map<string, DailyClosingReport>();
+        serverList.forEach((r) => { if (r && r.id) repMap.set(r.id, r); });
+        localList.forEach((loc) => {
+          if (!loc || !loc.id) return;
+          if (!repMap.has(loc.id)) repMap.set(loc.id, loc);
+        });
+        const merged = deduplicateDailyReports(Array.from(repMap.values()));
+        setReports(merged);
+        saveDailyReportsLocally(merged);
+      } else {
+        setReports(deduplicateDailyReports(getDailyReports()));
+      }
+
+      if (resGrn && resGrn.ok) {
+        const data = await resGrn.json();
+        const serverList: GrnRecord[] = Array.isArray(data) ? data : [];
+        const localList: GrnRecord[] = getGrnRecords();
+        const grnMap = new Map<string, GrnRecord>();
+        serverList.forEach((g) => { if (g && g.id) grnMap.set(g.id, g); });
+        localList.forEach((loc) => {
+          if (!loc || !loc.id) return;
+          if (!grnMap.has(loc.id)) grnMap.set(loc.id, loc);
+        });
+        const merged = Array.from(grnMap.values());
+        setGrnRecords(merged);
+        localStorage.setItem('grn_records', JSON.stringify(merged));
+      } else {
+        setGrnRecords(getGrnRecords());
+      }
+
+      setLossConfig(getLossConfig());
+    } catch (e) {
+      console.warn('Using local fallback state:', e);
+      setStores(getStores());
+      setUsers(getUsers());
+      setCogsList(getCogsMaster());
+      setAdjustments(getStockAdjustments());
+      setClosingRecords(getClosingPlanRecords());
+      setGrnRecords(getGrnRecords());
+      setItems(deduplicateThawingItems(getThawingItems()));
+      setSegments(getFabricationSegments());
+      setReports(deduplicateDailyReports(getDailyReports()));
+      setLossConfig(getLossConfig());
+    } finally {
+      setIsRefreshing(false);
+      setIsInitializing(false);
+    }
+  };
+
+  useEffect(() => {
+    // 1. Permanent Butcher Session
+    setCurrentUserState(DEFAULT_BUTCHER_USER);
+    setActiveTab('dashboard');
+
+    // 2. Fetch initial data on mount (without touching activeTab)
+    fetchAllData(true);
+
+    // 3. Periodic background polling (every 3s if tab is visible) to auto-sync data across Butcher, Admin, and MD in realtime
+    const pollInterval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        fetchAllData(true);
+      }
+    }, 3000);
+
+    // 4. Instant sync on tab return / window focus
+    const handleFocus = () => {
+      if (document.visibilityState === 'visible') {
+        fetchAllData(true);
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleFocus);
+
+    // 5. Cross-tab instant communication via BroadcastChannel
+    let bc: BroadcastChannel | null = null;
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        bc = new BroadcastChannel('tdn_meat_tracker_channel');
+        bc.onmessage = (event) => {
+          const { type, record, item, segments: inSegs, adjustment, report } = event.data || {};
+          if (type === 'CLOSING_RECORD_SAVED' && record) {
+            const incoming: ClosingPlanRecord = record;
+            setClosingRecords((prev) => {
+              const existingIdx = prev.findIndex((r) => Boolean(incoming.id && r.id && r.id === incoming.id));
+              if (existingIdx >= 0) {
+                const next = [...prev];
+                next[existingIdx] = incoming;
+                return next;
+              }
+              return [incoming, ...prev];
+            });
+          } else if (type === 'THAWING_ITEM_SAVED' && item) {
+            setItems((prev) => {
+              const existingIdx = prev.findIndex((i) => i.id === item.id);
+              if (existingIdx >= 0) {
+                const next = [...prev];
+                next[existingIdx] = { ...next[existingIdx], ...item };
+                return next;
+              }
+              return [item, ...prev];
+            });
+          } else if (type === 'FABRICATION_SEGMENTS_SAVED') {
+            if (Array.isArray(inSegs)) {
+              setSegments((prev) => {
+                const map = new Map(prev.map((s) => [s.id, s]));
+                inSegs.forEach((s) => map.set(s.id, s));
+                return Array.from(map.values());
+              });
+            }
+            if (item) {
+              setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, ...item } : i)));
+            }
+          } else if (type === 'ADJUSTMENT_SAVED' && adjustment) {
+            setAdjustments((prev) => {
+              const idx = prev.findIndex((a) => a.id === adjustment.id);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = adjustment;
+                return next;
+              }
+              return [adjustment, ...prev];
+            });
+          } else if (type === 'REPORT_SAVED' && report) {
+            setReports((prev) => {
+              const idx = prev.findIndex((r) => r.id === report.id);
+              if (idx >= 0) {
+                const next = [...prev];
+                next[idx] = report;
+                return next;
+              }
+              return [report, ...prev];
+            });
+          } else if (type === 'DATA_REFRESH_REQUESTED') {
+            fetchAllData(true);
+          }
+        };
+      } catch (e) {
+        console.warn('BroadcastChannel setup error:', e);
+      }
+    }
+
+    return () => {
+      clearInterval(pollInterval);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleFocus);
+      if (bc) {
+        try {
+          bc.close();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
+
+  // Handler: Login Success from SQL
+  const handleLoginSuccess = (user: UserAccount) => {
+    const roleNorm = normalizeRole(user.role);
+    const userObj = { ...user, role: roleNorm };
+    setCurrentUserState(userObj);
+    setCurrentUser(userObj);
+    fetchAllData(true);
+    if (roleNorm === 'md') {
+      setActiveTab('md');
+    } else if (roleNorm === 'admin') {
+      setActiveTab('admin_toko');
+    } else {
+      setActiveTab('dashboard');
+    }
+  };
+
+  // Handler: Add Item for Thawing
+  const handleAddItem = (
+    newItem: Omit<ThawingItem, 'id' | 'status' | 'thawingStartTime' | 'createdAt' | 'butcherId' | 'butcherName'> & {
+      id?: string;
+      createdAt?: string;
+      status?: 'thawing' | 'pabrikasi_ready' | 'pabrikasi_done';
+      thawingStartTime?: string;
+      storeId?: string;
+      storeName?: string;
+    }
+  ) => {
+    const now = new Date();
+    const resolvedStoreId =
+      newItem.storeId ||
+      (currentStore && currentStore.id !== 'all' ? currentStore.id : undefined) ||
+      currentUser?.storeId ||
+      '1';
+    const resolvedStoreName =
+      newItem.storeName ||
+      (currentStore && currentStore.id !== 'all' ? currentStore.name : undefined) ||
+      currentUser?.storeName ||
+      'TDN CKR';
+    const createdAtTime = newItem.createdAt || now.toISOString();
+    const itemId = newItem.id && newItem.id.trim() ? newItem.id.trim() : `meat_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const item: ThawingItem = {
+      ...newItem,
+      id: itemId,
+      storeId: resolvedStoreId,
+      storeName: resolvedStoreName,
+      status: newItem.status || 'thawing',
+      thawingStartTime: newItem.thawingStartTime || createdAtTime,
+      createdAt: createdAtTime,
+      butcherName: currentUser?.fullName || 'Petugas Butcher',
+      isCarryover: newItem.isCarryover || false,
+    };
+    setItems((prev) => {
+      const updated = deduplicateThawingItems([item, ...prev]);
+      saveThawingItems(updated, item);
+      return updated;
+    });
+
+    // Sync to backend immediately
+    fetch('/api/thawing-items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(item)
+    }).catch(console.error);
+
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        const chan = new BroadcastChannel('tdn_meat_tracker_channel');
+        chan.postMessage({ type: 'THAWING_ITEM_SAVED', item });
+        chan.close();
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  // Handler: Batch Add Items (guarantees multiple items are added without closure overwrite)
+  const handleAddItems = (newItemsList: Array<Omit<ThawingItem, 'id' | 'status' | 'thawingStartTime' | 'createdAt' | 'butcherId' | 'butcherName'> & {
+    id?: string;
+    createdAt?: string;
+    status?: 'thawing' | 'pabrikasi_ready' | 'pabrikasi_done';
+    thawingStartTime?: string;
+    storeId?: string;
+    storeName?: string;
+  }>) => {
+    if (!newItemsList || newItemsList.length === 0) return;
+    const now = new Date();
+    const resolvedStoreId =
+      (currentStore && currentStore.id !== 'all' ? currentStore.id : undefined) ||
+      currentUser?.storeId ||
+      '1';
+    const resolvedStoreName =
+      (currentStore && currentStore.id !== 'all' ? currentStore.name : undefined) ||
+      currentUser?.storeName ||
+      'TDN CKR';
+    const preparedItems: ThawingItem[] = newItemsList.map((newItem, idx) => {
+      const createdAtTime = newItem.createdAt || now.toISOString();
+      const itemId = newItem.id && newItem.id.trim() ? newItem.id.trim() : `meat_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`;
+      return {
+        ...newItem,
+        id: itemId,
+        storeId: newItem.storeId || resolvedStoreId,
+        storeName: newItem.storeName || resolvedStoreName,
+        status: newItem.status || 'thawing',
+        thawingStartTime: newItem.thawingStartTime || createdAtTime,
+        createdAt: createdAtTime,
+        butcherName: currentUser?.fullName || 'Petugas Butcher',
+        isCarryover: newItem.isCarryover || false,
+      };
+    });
+
+    setItems((prev) => {
+      const updated = deduplicateThawingItems([...preparedItems, ...prev]);
+      saveThawingItems(updated);
+      return updated;
+    });
+
+    preparedItems.forEach((item) => {
+      fetch('/api/thawing-items', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(item)
+      }).catch(console.error);
+    });
+  };
+
+  // Handler: Update Item
+  const handleUpdateItem = (updatedItem: ThawingItem) => {
+    const updated = items.map((i) => (i.id === updatedItem.id ? updatedItem : i));
+    setItems(updated);
+    saveThawingItems(updated);
+
+    fetch('/api/thawing-items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedItem)
+    }).catch(console.error);
+  };
+
+  // Handler: Delete Item(s)
+  const handleDeleteItem = (itemIdOrIds: string | string[]) => {
+    const ids = Array.isArray(itemIdOrIds) ? itemIdOrIds : [itemIdOrIds];
+    const updated = items.filter((i) => !ids.includes(i.id));
+    setItems(updated);
+    saveThawingItems(updated);
+
+    ids.forEach((id) => {
+      fetch(`/api/thawing-items/${id}`, { method: 'DELETE' }).catch(() => {});
+    });
+  };
+
+  // Handler: Confirm Thawing Finish (MANDATORY Photo)
+  const handleStartFabrication = (id: string, weightAfter: number, photoImage?: string) => {
+    const updated = items.map((item) => {
+      if (item.id === id) {
+        const lossKg = Math.max(0, item.weightBeforeThawing - weightAfter);
+        const lossPct = item.weightBeforeThawing > 0 ? (lossKg / item.weightBeforeThawing) * 100 : 0;
+        const updatedObj = {
+          ...item,
+          status: 'pabrikasi_ready' as const,
+          weightAfterThawing: weightAfter,
+          thawingEndTime: new Date().toISOString(),
+          shrinkageThawing: lossKg,
+          shrinkageThawingPercent: lossPct,
+          image: photoImage || item.image || '',
+        };
+        fetch('/api/thawing-items', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedObj)
+        }).catch(console.error);
+        return updatedObj;
+      }
+      return item;
+    });
+    setItems(updated);
+    saveThawingItems(updated);
+  };
+
+  // Handler: Save Segments from SegmentasiPabrikasi
+  const handleSaveSegments = (
+    itemId: string,
+    newSegmentInputs: { segmentName: string; targetWeight: number; actualWeight: number }[],
+    updatedPlan?: string,
+    updatedPurpose?: 'UNTUK PESANAN' | 'UNTUK DISPLAY'
+  ) => {
+    const parentItem = items.find((i) => i.id === itemId);
+    const planName = updatedPlan || parentItem?.plannedFabrication || 'DAGING RENDANG PREMIUM';
+    const purpose = updatedPurpose || parentItem?.openingPurpose || 'UNTUK DISPLAY';
+
+    const createdSegments: FabricationSegment[] = newSegmentInputs.map((seg, idx) => ({
+      id: `seg_${Date.now()}_${idx}`,
+      itemId,
+      itemName: parentItem?.name || 'Bahan Daging',
+      segmentName: seg.segmentName,
+      targetWeight: seg.targetWeight,
+      actualWeight: seg.actualWeight,
+      periodicShrinkage: 0,
+      salesKg: 0,
+      plannedFabrication: planName,
+      openingPurpose: purpose,
+      storeId: parentItem?.storeId || currentStore?.id || currentUser?.storeId || '1',
+      createdAt: new Date().toISOString(),
+    }));
+
+    const updatedSegments = [...segments, ...createdSegments];
+    setSegments(updatedSegments);
+    saveFabricationSegments(updatedSegments);
+
+    fetch('/api/fabrication-segments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(createdSegments)
+    }).catch(console.error);
+
+    // Update parent item to pabrikasi_done
+    const updatedItems = items.map((i) =>
+      i.id === itemId
+        ? {
+            ...i,
+            status: 'pabrikasi_done' as const,
+            plannedFabrication: planName,
+            openingPurpose: purpose,
+          }
+        : i
+    );
+    setItems(updatedItems);
+    saveThawingItems(updatedItems);
+    const updatedParent = updatedItems.find((i) => i.id === itemId);
+
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        const chan = new BroadcastChannel('tdn_meat_tracker_channel');
+        chan.postMessage({ type: 'FABRICATION_SEGMENTS_SAVED', segments: createdSegments, item: updatedParent });
+        chan.close();
+      } catch {
+        // ignore
+      }
+    }
+  };
+
+  // Handler: Update Sales from UpdateSales
+  const handleUpdateSales = (
+    planNameOrSegmentId: string,
+    salesAmountKg: number,
+    overridePhysicalClosingKg?: number
+  ) => {
+    const isSegment = segments.some((s) => s.id === planNameOrSegmentId);
+    let updatedSegments: FabricationSegment[];
+
+    const isMatchPlan = (a?: string, b?: string) => {
+      if (!a || !b) return false;
+      const cleanA = a.toLowerCase().trim();
+      const cleanB = b.toLowerCase().trim();
+      return cleanA === cleanB || cleanA.includes(cleanB) || cleanB.includes(cleanA);
+    };
+
+    if (isSegment) {
+      updatedSegments = segments.map((s) => {
+        if (s.id === planNameOrSegmentId) {
+          const currentSales = s.salesKg || 0;
+          const newActual = overridePhysicalClosingKg !== undefined ? overridePhysicalClosingKg : Math.max(0, s.actualWeight - salesAmountKg);
+          return {
+            ...s,
+            salesKg: currentSales + salesAmountKg,
+            actualWeight: newActual,
+          };
+        }
+        return s;
+      });
+    } else {
+      updatedSegments = segments.map((s) => {
+        const parentItem = items.find((i) => i.id === s.itemId);
+        const plan = s.plannedFabrication || parentItem?.plannedFabrication;
+        if (isMatchPlan(plan, planNameOrSegmentId) && (s.openingPurpose || 'UNTUK DISPLAY') === 'UNTUK DISPLAY') {
+          const currentSales = s.salesKg || 0;
+          return {
+            ...s,
+            salesKg: currentSales + salesAmountKg,
+            actualWeight: Math.max(0, s.actualWeight - salesAmountKg),
+          };
+        }
+        return s;
+      });
+    }
+
+    setSegments(updatedSegments);
+    saveFabricationSegments(updatedSegments);
+
+    fetch('/api/fabrication-segments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedSegments)
+    }).catch(console.error);
+
+    // ADAPTIVE RECALCULATION OF CLOSING RECORDS:
+    // Even if closing was already done, updating sales recalculates system stock and susut jual dynamically!
+    const effectiveStoreId = currentStore?.id || currentUser?.storeId || 'store_ckr';
+    const updatedItems = items.map((i) => {
+      if (isMatchPlan(i.plannedFabrication, planNameOrSegmentId) && matchStoreEntity(i.storeId, currentStore)) {
+        return {
+          ...i,
+          salesKg: (i.salesKg || 0) + salesAmountKg,
+        };
+      }
+      return i;
+    });
+    setItems(updatedItems);
+    saveThawingItems(updatedItems);
+
+    let foundMatchingRecord = false;
+    let updatedClosingRecords = closingRecords.map((rec) => {
+      if (matchStoreEntity(rec.storeId, currentStore) && isMatchPlan(rec.planName, planNameOrSegmentId)) {
+        foundMatchingRecord = true;
+        const planSegments = updatedSegments.filter((s) => isMatchPlan(s.plannedFabrication, rec.planName));
+        const totalPlanSales = planSegments.length > 0
+          ? planSegments.reduce((sum, s) => sum + (s.salesKg || 0), 0)
+          : (rec.salesKg || 0) + salesAmountKg;
+        const totalTersedia = (rec.openingStockKg || 0) + (rec.newProcessedKg || 0) + (rec.adjustInKg || 0) - (rec.adjustOutKg || 0);
+        const closingBySystem = Math.max(0, totalTersedia - totalPlanSales);
+        const actualClosing = overridePhysicalClosingKg !== undefined ? overridePhysicalClosingKg : rec.actualClosingStockKg;
+        const susutJualKg = typeof actualClosing === 'number' ? Math.max(0, closingBySystem - actualClosing) : 0;
+
+        return {
+          ...rec,
+          salesKg: parseFloat(totalPlanSales.toFixed(3)),
+          closingStockBySystemKg: parseFloat(closingBySystem.toFixed(3)),
+          actualClosingStockKg: actualClosing,
+          susutJualKg: parseFloat(susutJualKg.toFixed(3)),
+        };
+      }
+      return rec;
+    });
+
+    // If no closing record existed yet but user entered physical override or closing
+    if (!foundMatchingRecord && overridePhysicalClosingKg !== undefined) {
+      const planItems = updatedItems.filter((i) => isMatchPlan(i.plannedFabrication, planNameOrSegmentId) && matchStoreEntity(i.storeId, currentStore));
+      const carryover = planItems.filter((i) => i.isCarryover).reduce((sum, i) => sum + (i.weightBeforeThawing || 0), 0);
+      const newProc = planItems.filter((i) => !i.isCarryover).reduce((sum, i) => sum + (i.weightAfterThawing || i.weightBeforeThawing || 0), 0);
+      const totalTersedia = carryover + newProc;
+      const closingBySystem = Math.max(0, totalTersedia - salesAmountKg);
+      const susutJualKg = Math.max(0, closingBySystem - overridePhysicalClosingKg);
+
+      const newRec: ClosingPlanRecord = {
+        id: `rec_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        storeId: effectiveStoreId,
+        date: new Date().toISOString().split('T')[0],
+        planName: planNameOrSegmentId,
+        category: planItems[0]?.pabrikasiCategory || 'DAGING FRESH',
+        openingStockKg: carryover,
+        newProcessedKg: newProc,
+        adjustInKg: 0,
+        adjustOutKg: 0,
+        salesKg: salesAmountKg,
+        closingStockBySystemKg: closingBySystem,
+        actualClosingStockKg: overridePhysicalClosingKg,
+        susutJualKg: susutJualKg,
+        butcherName: currentUser?.fullName || currentUser?.username || 'Kasir',
+        photoUrl: '',
+        timestamp: new Date().toISOString(),
+      };
+      updatedClosingRecords = [...updatedClosingRecords, newRec];
+    }
+
+    setClosingRecords(updatedClosingRecords);
+    saveClosingPlanRecords(updatedClosingRecords);
+
+    fetch('/api/closing-records', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedClosingRecords)
+    }).catch(console.error);
+  };
+
+  // Handler: Daily Closing Refresh & Carryover (Sisa Fisik Jadi Stok Awal Besok)
+  const handleDailyResetAndCarryover = () => {
+    const effectiveStoreId = currentStore?.id || currentUser?.storeId || 'store_ckr';
+    const storeClosings = closingRecords.filter((r) => matchStoreEntity(r.storeId, currentStore));
+    const storeSegs = segments.filter((s) => matchStoreEntity(s.storeId, currentStore));
+    const storeItms = items.filter((i) => matchStoreEntity(i.storeId, currentStore));
+
+    // 0. Freeze & Save official DailyClosingReport for this store closing before reset
+    const closingDate = storeClosings[0]?.date || new Date().toISOString().split('T')[0];
+    const totalRaw = storeItms.filter((i) => !i.isCarryover).reduce((s, i) => s + i.weightBeforeThawing, 0);
+    const totalThawed = storeItms.filter((i) => !i.isCarryover).reduce((s, i) => s + (i.weightAfterThawing || i.weightBeforeThawing), 0);
+    const totalFab = storeSegs.reduce((s, seg) => s + seg.actualWeight, 0);
+    const totalSales = storeSegs.reduce((s, seg) => s + (seg.salesKg || 0), 0) + storeClosings.reduce((s, c) => s + (c.salesKg || 0), 0);
+    const carryoverOpening = storeItms.filter((i) => i.isCarryover).reduce((s, i) => s + i.weightBeforeThawing, 0);
+    const currentClosing = storeClosings.reduce((s, c) => s + (c.actualClosingStockKg || 0), 0);
+    const totalThawLoss = Math.max(0, totalRaw - totalThawed);
+    const totalFabLoss = (storeSegs.length > 0 && totalFab > 0) ? Math.max(0, totalThawed - totalFab) : 0;
+    const totalProcessLoss = totalThawLoss + totalFabLoss;
+    const totalSusutJual = storeClosings.reduce((s, c) => s + (c.susutJualKg || 0), 0);
+
+    const closedReport: DailyClosingReport = {
+      id: `rep_closed_${effectiveStoreId}_${closingDate}_${Date.now()}`,
+      storeId: effectiveStoreId,
+      storeName: currentStore?.name || 'TDN CKR',
+      date: closingDate,
+      totalThawingQty: storeItms.length,
+      totalProcessedQty: storeSegs.length,
+      totalWeightBeforeThawing: totalRaw,
+      totalWeightAfterThawing: totalThawed,
+      totalWeightAfterFabrication: totalFab,
+      totalThawingLoss: totalThawLoss,
+      totalFabricationLoss: totalFabLoss,
+      totalProcessLoss: totalProcessLoss,
+      totalSusutJual: totalSusutJual,
+      totalSalesKg: totalSales,
+      carryoverOpeningStockKg: carryoverOpening,
+      currentClosingStockKg: currentClosing,
+      financialLossRupiah: (totalProcessLoss + totalSusutJual) * 102000,
+      butcherInCharge: currentUser?.fullName || 'Petugas Butcher',
+      adminInCharge: currentUser?.role === 'admin' ? currentUser.fullName : undefined,
+      isClosed: true,
+      closedAt: new Date().toISOString(),
+      closingPlanRecords: storeClosings,
+      itemsProcessed: storeItms.map((i) => ({
+        id: i.id,
+        name: i.name,
+        plannedFabrication: i.plannedFabrication,
+        pabrikasiCategory: i.pabrikasiCategory,
+        weightBefore: i.weightBeforeThawing,
+        weightAfter: i.weightAfterThawing || i.weightBeforeThawing,
+        finalWeight: i.weightAfterThawing || i.weightBeforeThawing,
+        thawingLossPercent: i.shrinkageThawingPercent || 0,
+        fabLossPercent: 0,
+        salesKg: i.salesKg || 0,
+        openingStockKg: i.isCarryover ? i.weightBeforeThawing : 0,
+        isCarryover: i.isCarryover,
+      })),
+      photos: storeClosings
+        .filter((c) => c.photoUrl)
+        .map((c, idx) => ({
+          id: `photo_${idx}_${Date.now()}`,
+          url: c.photoUrl!,
+          caption: c.photoCaption || `Bukti Closing ${c.planName}`,
+          category: 'Timbangan',
+          uploadedAt: c.timestamp,
+        })),
+    };
+
+    const newReports = [closedReport, ...reports.filter((r) => !(matchStoreEntity(r.storeId, currentStore) && r.date === closingDate))];
+    setReports(newReports);
+    saveDailyReports(newReports, closedReport);
+
+    // 1. Generate carryover thawing items from actual closing physical stock
+    const carryoverItems: ThawingItem[] = [];
+
+    // From closing records with physical stock > 0
+    storeClosings.forEach((rec) => {
+      if (rec.actualClosingStockKg > 0) {
+        carryoverItems.push({
+          id: `meat_carry_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          name: `${rec.planName} (Sisa Kemarin)`,
+          weightBeforeThawing: rec.actualClosingStockKg,
+          weightAfterThawing: rec.actualClosingStockKg,
+          shrinkageThawingPercent: 0,
+          thawingStartTime: new Date().toISOString(),
+          thawingEndTime: new Date().toISOString(),
+          status: 'pabrikasi_done',
+          plannedFabrication: rec.planName,
+          pabrikasiCategory: rec.category || 'DAGING FRESH',
+          openingPurpose: 'UNTUK DISPLAY',
+          isCarryover: true,
+          isTransferred: false,
+          createdAt: new Date().toISOString(),
+          storeId: effectiveStoreId,
+          butcherName: currentUser?.fullName || 'Butcher',
+          image: rec.photoUrl || '',
+        });
+      }
+    });
+
+    // Also include any segments that had actual weight > 0 if not covered in closing records
+    storeSegs.forEach((seg) => {
+      const parent = storeItms.find((i) => i.id === seg.itemId);
+      const planName = seg.plannedFabrication || parent?.plannedFabrication || seg.segmentName;
+      const alreadyHandled = storeClosings.some((c) => isMatchPlan(c.planName, planName));
+
+      if (!alreadyHandled && seg.actualWeight > 0) {
+        carryoverItems.push({
+          id: `meat_carry_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          name: `${seg.segmentName} (Sisa Kemarin)`,
+          weightBeforeThawing: seg.actualWeight,
+          weightAfterThawing: seg.actualWeight,
+          shrinkageThawingPercent: 0,
+          thawingStartTime: new Date().toISOString(),
+          thawingEndTime: new Date().toISOString(),
+          status: 'pabrikasi_done',
+          plannedFabrication: planName,
+          pabrikasiCategory: 'DAGING FRESH',
+          openingPurpose: seg.openingPurpose || 'UNTUK DISPLAY',
+          isCarryover: true,
+          isTransferred: false,
+          createdAt: new Date().toISOString(),
+          storeId: effectiveStoreId,
+          butcherName: currentUser?.fullName || 'Butcher',
+          image: '',
+        });
+      }
+    });
+
+    // 2. Keep items of other stores, replace this store's items with carryover items
+    const otherStoreItems = items.filter((i) => !matchStoreEntity(i.storeId, currentStore));
+    const newItems = [...otherStoreItems, ...carryoverItems];
+    setItems(newItems);
+    saveThawingItems(newItems);
+
+    // 3. Clear today's segments for this store, keep other stores
+    const otherStoreSegments = segments.filter((s) => !matchStoreEntity(s.storeId, currentStore));
+    setSegments(otherStoreSegments);
+    saveFabricationSegments(otherStoreSegments);
+
+    // 4. Reset today's active closing records for this store to allow fresh closing tomorrow
+    const otherStoreClosings = closingRecords.filter((r) => !matchStoreEntity(r.storeId, currentStore));
+    setClosingRecords(otherStoreClosings);
+    saveClosingPlanRecords(otherStoreClosings);
+
+    // 5. Sync to backend API
+    fetch('/api/thawing-items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newItems),
+    }).catch(console.error);
+
+    fetch('/api/fabrication-segments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(otherStoreSegments),
+    }).catch(console.error);
+
+    fetch('/api/closing-records', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(otherStoreClosings),
+    }).catch(console.error);
+  };
+
+  // Handler: Update Sales Prediction Target
+  const handleUpdateSalesPrediction = (newTargetKg: number) => {
+    const updatedConfig = { ...lossConfig, salesPredictionKg: newTargetKg };
+    setLossConfig(updatedConfig);
+    saveLossConfig(updatedConfig);
+  };
+
+  // Handler: Save Daily Closing Report
+  const handleSaveDailyReport = (report: DailyClosingReport) => {
+    // If a report already exists for the same store and date, replace it to avoid duplicates
+    const filtered = reports.filter(
+      (r) => !(r.date === report.date && matchStoreEntity(r.storeId, currentStore || { id: report.storeId }))
+    );
+    const updated = [report, ...filtered];
+    setReports(updated);
+    saveDailyReports(updated);
+
+    fetch('/api/reports', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(report)
+    }).catch(console.error);
+  };
+
+  // Handler: Save Closing Plan Record (Physical Closing)
+  const handleSaveClosingRecord = (record: Omit<ClosingPlanRecord, 'id' | 'timestamp'> & { id?: string; timestamp?: string }) => {
+    const cleanDate = (record.date || '').split('T')[0] || new Date().toISOString().split('T')[0];
+    const recId = record.id || getDeterministicClosingRecordId(record.storeId, record.planName, cleanDate);
+
+    // Business Logic: Data H-1 hari inilah yang baru terhitung menjadi sisa kemarin / stock awal tanggal ini
+    let finalOpeningKg = typeof record.openingStockKg === 'number' ? record.openingStockKg : 0;
+    if (finalOpeningKg === 0) {
+      const h1Rec = findHMinus1ClosingRecord(closingRecords, { id: record.storeId }, record.planName, cleanDate);
+      if (h1Rec && typeof h1Rec.actualClosingStockKg === 'number') {
+        finalOpeningKg = h1Rec.actualClosingStockKg;
+      }
+    }
+
+    const effectiveGrnOrProc = (typeof record.grnKg === 'number' ? record.grnKg : (record.newProcessedKg || 0));
+    const totalTersedia = finalOpeningKg + effectiveGrnOrProc + (record.adjustInKg || 0) - (record.adjustOutKg || 0);
+    const closingBySystem = Math.max(0, totalTersedia - (record.salesKg || 0));
+
+    let actualClosing = record.actualClosingStockKg;
+    let susutJual = 0;
+
+    if (record.isUnopened) {
+      actualClosing = closingBySystem;
+      susutJual = 0;
+    } else if (typeof actualClosing === 'number') {
+      susutJual = Math.max(0, closingBySystem - actualClosing);
+    } else {
+      susutJual = record.susutJualKg || 0;
+    }
+
+    const newRec: ClosingPlanRecord = {
+      ...record,
+      id: recId,
+      date: cleanDate,
+      openingStockKg: parseFloat(finalOpeningKg.toFixed(3)),
+      closingStockBySystemKg: parseFloat(closingBySystem.toFixed(3)),
+      actualClosingStockKg: typeof actualClosing === 'number' ? parseFloat(actualClosing.toFixed(3)) : undefined,
+      susutJualKg: parseFloat(susutJual.toFixed(3)),
+      timestamp: record.timestamp || (cleanDate ? `${cleanDate}T17:00:00.000Z` : new Date().toISOString()),
+    };
+    
+    setClosingRecords((prev) => {
+      // Strictly match by ID to ensure separate entries with the same product name and same amount are preserved
+      const existingIdx = prev.findIndex(
+        (r) => Boolean(newRec.id && r.id && r.id === newRec.id)
+      );
+      let updated: ClosingPlanRecord[];
+      if (existingIdx >= 0) {
+        updated = [...prev];
+        updated[existingIdx] = { ...prev[existingIdx], ...newRec };
+      } else {
+        updated = [newRec, ...prev];
+      }
+
+      // Propagate: Data closing hari ini langsung menjadi sisa kemarin (stok awal) untuk H+1 (hari esok) jika record H+1 sudah ada
+      updated = propagateClosingToNextDay(newRec, updated);
+
+      saveClosingPlanRecords(updated, newRec);
+      return updated;
+    });
+
+    // Cross-tab broadcast for instant multi-device/multi-window synchronization
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      try {
+        const bc = new BroadcastChannel('tdn_meat_tracker_channel');
+        bc.postMessage({ type: 'CLOSING_RECORD_SAVED', record: newRec });
+        bc.close();
+      } catch (err) {
+        console.warn('BroadcastChannel sync error:', err);
+      }
+    }
+
+    // Trigger subtle refresh to verify alignment
+    setTimeout(() => {
+      fetchAllData(true);
+    }, 2000);
+  };
+
+  // Handler: Save GRN (Goods Received Note for Sosis, Kentang, Fillet Dori & Parting Ayam)
+  const handleSaveGrn = (records: GrnRecord[] | GrnRecord) => {
+    const incoming = Array.isArray(records) ? records : [records];
+    setGrnRecords((prev) => {
+      const updated = [...prev];
+      incoming.forEach((rec) => {
+        // Strictly match by unique ID to allow multiple shipments with same product name and amount
+        const idx = updated.findIndex((r) => Boolean(rec.id && r.id && r.id === rec.id));
+        if (idx >= 0) {
+          updated[idx] = { ...updated[idx], ...rec };
+        } else {
+          updated.unshift(rec);
+        }
+      });
+      return updated;
+    });
+    saveGrnRecords(incoming);
+  };
+
+  // Handler: Batch Update Sales List
+  const handleUpdateSalesList = (salesList: { planName: string; salesKg: number }[]) => {
+    salesList.forEach((item) => {
+      handleUpdateSales(item.planName, item.salesKg);
+    });
+  };
+
+  // Handler: Transfer Purpose (Pesanan <-> Display)
+  const handleTransferPurpose = (
+    id: string,
+    isSegment: boolean,
+    targetPurpose: 'UNTUK PESANAN' | 'UNTUK DISPLAY',
+    transferWeightKg?: number
+  ) => {
+    if (isSegment) {
+      const sourceSeg = segments.find((s) => s.id === id);
+      if (!sourceSeg) return;
+
+      const isPartial = typeof transferWeightKg === 'number' && transferWeightKg > 0 && transferWeightKg < sourceSeg.actualWeight;
+
+      if (isPartial && transferWeightKg) {
+        const remainingWeight = parseFloat((sourceSeg.actualWeight - transferWeightKg).toFixed(3));
+        const updatedSource: FabricationSegment = {
+          ...sourceSeg,
+          actualWeight: remainingWeight,
+        };
+
+        const newTransferSegment: FabricationSegment = {
+          id: `seg_trans_${Date.now()}`,
+          itemId: sourceSeg.itemId,
+          itemName: sourceSeg.itemName,
+          segmentName: `${sourceSeg.segmentName} (Transfer ${targetPurpose === 'UNTUK PESANAN' ? 'Pesanan' : 'Display'})`,
+          plannedFabrication: sourceSeg.plannedFabrication,
+          targetWeight: transferWeightKg,
+          actualWeight: transferWeightKg,
+          openingPurpose: targetPurpose,
+          isTransferred: true,
+          originalPurpose: sourceSeg.openingPurpose || 'UNTUK DISPLAY',
+          transferTimestamp: new Date().toISOString(),
+          periodicShrinkage: 0,
+          salesKg: 0,
+          createdAt: new Date().toISOString(),
+          storeId: sourceSeg.storeId || currentUser?.storeId || 'store_ckr',
+        };
+
+        const updatedSegments = segments.map((s) => (s.id === id ? updatedSource : s)).concat(newTransferSegment);
+        setSegments(updatedSegments);
+        saveFabricationSegments(updatedSegments);
+      } else {
+        const updatedSegments = segments.map((s) => {
+          if (s.id === id) {
+            return {
+              ...s,
+              openingPurpose: targetPurpose,
+              isTransferred: true,
+              originalPurpose: s.originalPurpose || s.openingPurpose || 'UNTUK DISPLAY',
+              transferTimestamp: new Date().toISOString(),
+            };
+          }
+          return s;
+        });
+        setSegments(updatedSegments);
+        saveFabricationSegments(updatedSegments);
+      }
+    } else {
+      const sourceItem = items.find((i) => i.id === id);
+      if (!sourceItem) return;
+
+      const currentWeight = sourceItem.weightAfterThawing ?? sourceItem.weightBeforeThawing;
+      const isPartial = typeof transferWeightKg === 'number' && transferWeightKg > 0 && transferWeightKg < currentWeight;
+
+      if (isPartial && transferWeightKg) {
+        const remainingWeight = parseFloat((currentWeight - transferWeightKg).toFixed(3));
+        const updatedSourceItem: ThawingItem = {
+          ...sourceItem,
+          weightBeforeThawing: sourceItem.weightAfterThawing !== undefined ? sourceItem.weightBeforeThawing : remainingWeight,
+          weightAfterThawing: sourceItem.weightAfterThawing !== undefined ? remainingWeight : undefined,
+        };
+
+        const newTransferItem: ThawingItem = {
+          ...sourceItem,
+          id: `meat_trans_${Date.now()}`,
+          name: `${sourceItem.name} (Transfer ke ${targetPurpose === 'UNTUK PESANAN' ? 'Pesanan' : 'Display'})`,
+          weightBeforeThawing: transferWeightKg,
+          weightAfterThawing: sourceItem.weightAfterThawing !== undefined ? transferWeightKg : undefined,
+          openingPurpose: targetPurpose,
+          isTransferred: true,
+          originalPurpose: sourceItem.openingPurpose || 'UNTUK DISPLAY',
+          transferTimestamp: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+        };
+
+        const updatedItems = items.map((i) => (i.id === id ? updatedSourceItem : i)).concat(newTransferItem);
+        setItems(updatedItems);
+        saveThawingItems(updatedItems);
+      } else {
+        const updatedItems = items.map((i) => {
+          if (i.id === id) {
+            return {
+              ...i,
+              openingPurpose: targetPurpose,
+              isTransferred: true,
+              originalPurpose: i.originalPurpose || i.openingPurpose || 'UNTUK DISPLAY',
+              transferTimestamp: new Date().toISOString(),
+            };
+          }
+          return i;
+        });
+        setItems(updatedItems);
+        saveThawingItems(updatedItems);
+      }
+    }
+  };
+
+  // Handler: Edit Rencana Potong
+  const handleUpdatePlan = (itemId: string, newPlanName: string, updateSegmentNames: boolean) => {
+    const updatedItems = items.map((item) => {
+      if (item.id === itemId) {
+        return {
+          ...item,
+          plannedFabrication: newPlanName,
+        };
+      }
+      return item;
+    });
+    setItems(updatedItems);
+    saveThawingItems(updatedItems);
+
+    if (updateSegmentNames) {
+      const updatedSegments = segments.map((seg) => {
+        if (seg.itemId === itemId) {
+          return {
+            ...seg,
+            plannedFabrication: newPlanName,
+          };
+        }
+        return seg;
+      });
+      setSegments(updatedSegments);
+      saveFabricationSegments(updatedSegments);
+    }
+  };
+
+  // Handler: Add Stock Adjustment (Adjust IN/OUT)
+  const handleAddAdjustment = (adj: Omit<StockAdjustment, 'id' | 'createdAt'>) => {
+    const newAdj: StockAdjustment = {
+      ...adj,
+      id: `adj_${Date.now()}`,
+      createdAt: new Date().toISOString(),
+    };
+    const updated = [newAdj, ...adjustments];
+    setAdjustments(updated);
+    saveStockAdjustments(updated);
+
+    fetch('/api/adjustments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newAdj)
+    }).catch(console.error);
+  };
+
+  const handleDeleteAdjustment = (id: string) => {
+    const updated = adjustments.filter((a) => a.id !== id);
+    setAdjustments(updated);
+    saveStockAdjustments(updated);
+
+    fetch(`/api/adjustments/${id}`, { method: 'DELETE' }).catch(console.error);
+  };
+
+  const handleDeleteClosingRecord = (id: string) => {
+    const deletedRec = closingRecords.find((r) => r.id === id);
+    let updated = closingRecords.filter((r) => r.id !== id);
+
+    if (deletedRec) {
+      const cleanDate = (deletedRec.date || deletedRec.timestamp || '').split('T')[0];
+      const nextDate = getNextDateStr(cleanDate);
+      // Jika H-1 dihapus, maka sisa kemarin untuk H+1 kembali menjadi 0 (terisolasi harian)
+      updated = updated.map((r) => {
+        const rDate = (r.date || r.timestamp || '').split('T')[0];
+        if (
+          rDate === nextDate &&
+          matchStoreEntity(r.storeId, { id: deletedRec.storeId }) &&
+          isMatchPlan(r.planName, deletedRec.planName)
+        ) {
+          const totalTersedia = (r.newProcessedKg || 0) + (r.adjustInKg || 0) - (r.adjustOutKg || 0);
+          const closingStockBySystemKg = Math.max(0, totalTersedia - (r.salesKg || 0));
+          const susutJualKg = Math.max(0, closingStockBySystemKg - (r.actualClosingStockKg || 0));
+          return {
+            ...r,
+            openingStockKg: 0,
+            closingStockBySystemKg: parseFloat(closingStockBySystemKg.toFixed(3)),
+            susutJualKg: parseFloat(susutJualKg.toFixed(3)),
+          };
+        }
+        return r;
+      });
+    }
+
+    setClosingRecords(updated);
+    saveClosingPlanRecords(updated);
+    deleteClosingPlanRecord(id);
+  };
+
+  const handleDeleteReport = (id: string) => {
+    const updated = reports.filter((r) => r.id !== id);
+    setReports(updated);
+    saveDailyReports(updated);
+    deleteDailyReport(id);
+  };
+
+  const handlePurgeDate = (dateToPurge: string) => {
+    purgeDateRecords(dateToPurge);
+    setClosingRecords((prev) => prev.filter((r) => (r.date || r.timestamp || '').split('T')[0] !== dateToPurge));
+    setItems((prev) => prev.filter((i) => (i.createdAt || i.thawingStartTime || '').split('T')[0] !== dateToPurge));
+    setSegments((prev) => prev.filter((s) => (s.createdAt || s.transferTimestamp || '').split('T')[0] !== dateToPurge));
+    setAdjustments((prev) => prev.filter((a) => (a.date || a.createdAt || '').split('T')[0] !== dateToPurge));
+    setReports((prev) => prev.filter((r) => (r.date || '').split('T')[0] !== dateToPurge));
+  };
+
+  // Handler: MD Add Store + Generate Paired Butcher & Admin Accounts to SQL
+  const handleAddStore = async (
+    storeData: Omit<Store, 'id' | 'createdAt'>,
+    butcherName: string,
+    adminName: string,
+    butcherPassword?: string,
+    adminPassword?: string
+  ) => {
+    const storeId = `store_${storeData.code.toLowerCase()}`;
+    const newStore: Store = {
+      ...storeData,
+      id: storeId,
+      createdAt: new Date().toISOString().split('T')[0],
+    };
+
+    const butcherUser: UserAccount = {
+      id: `user_butcher_${storeData.code.toLowerCase()}`,
+      username: `butcher_${storeData.code.toLowerCase()}`,
+      role: 'butcher',
+      storeId: storeId,
+      storeName: newStore.name,
+      fullName: butcherName,
+      pin: butcherPassword || 'butcher123',
+      linkedAccountId: `user_admin_${storeData.code.toLowerCase()}`,
+      createdAt: new Date().toISOString().split('T')[0],
+    };
+
+    const adminUser: UserAccount = {
+      id: `user_admin_${storeData.code.toLowerCase()}`,
+      username: `admin_${storeData.code.toLowerCase()}`,
+      role: 'admin',
+      storeId: storeId,
+      storeName: newStore.name,
+      fullName: adminName,
+      pin: adminPassword || 'admin123',
+      linkedAccountId: `user_butcher_${storeData.code.toLowerCase()}`,
+      createdAt: new Date().toISOString().split('T')[0],
+    };
+
+    const updatedStores = [...stores, newStore];
+    const updatedUsers = [...users, butcherUser, adminUser];
+
+    setStores(updatedStores);
+    setUsers(updatedUsers);
+    saveStores(updatedStores);
+    saveUsers(updatedUsers);
+
+    // Save to System Backend
+    try {
+      await fetch('/api/stores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code: storeData.code,
+          name: storeData.name,
+          city: storeData.city,
+          butcherName,
+          butcherPassword: butcherPassword || 'butcher123',
+          adminName,
+          adminPassword: adminPassword || 'admin123'
+        })
+      });
+    } catch (e) {
+      console.error('Failed to sync new store to SQL backend:', e);
+    }
+  };
+
+  // Handler: Update COGS Master (Strictly restricted to MD role)
+  const handleUpdateCogs = (updatedCogs: CogsMaster[]) => {
+    if (currentUser?.role !== 'md') {
+      console.warn('Unauthorized COGS update attempt by non-MD user:', currentUser);
+      alert('Akses Ditolak: Hanya akun MD (Merchandising Pusat) yang memiliki wewenang untuk mengatur dan mengubah Master COGS.');
+      return;
+    }
+    setCogsList(updatedCogs);
+    saveCogsMaster(updatedCogs);
+
+    fetch('/api/cogs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedCogs)
+    }).catch(console.error);
+  };
+
+  // Reset database helper
+  const handleResetData = () => {
+    if (window.confirm('Reset semua data lokal ke format standar demo?')) {
+      resetDatabase();
+      window.location.reload();
+    }
+  };
+
+  // Submit from Account Settings Modal
+  const handleModalAddStore = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newStoreCode.trim() || !newStoreName.trim() || !newStoreCity.trim()) return;
+    if (!newButcherName.trim() || !newAdminName.trim()) return;
+
+    handleAddStore(
+      {
+        code: newStoreCode.trim().toUpperCase(),
+        name: newStoreName.trim().startsWith('TDN ') ? newStoreName.trim() : `TDN ${newStoreName.trim()}`,
+        city: newStoreCity.trim(),
+      },
+      newButcherName.trim(),
+      newAdminName.trim(),
+      newButcherPassword.trim() || 'butcher123',
+      newAdminPassword.trim() || 'admin123'
+    );
+
+    setNewStoreCode('');
+    setNewStoreName('');
+    setNewStoreCity('');
+    setNewButcherName('');
+    setNewAdminName('');
+    setAddStoreSuccess(true);
+    setTimeout(() => setAddStoreSuccess(false), 3000);
+  };
+
+  // Loading state
+  if (isInitializing) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center text-white space-y-3">
+        <div className="w-10 h-10 border-4 border-red-600 border-t-transparent rounded-full animate-spin" />
+        <p className="text-xs font-semibold text-slate-400">Memuat Sistem Database Daging...</p>
+      </div>
+    );
+  }
+
+  // Touch swipe support for mobile sidebar
+  const handleTouchStart = (e: React.TouchEvent) => {
+    setTouchStartX(e.touches[0].clientX);
+    setTouchStartY(e.touches[0].clientY);
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (touchStartX === null || touchStartY === null) return;
+    const deltaX = e.changedTouches[0].clientX - touchStartX;
+    const deltaY = e.changedTouches[0].clientY - touchStartY;
+
+    // Horizontal swipe gesture detection
+    if (Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 40) {
+      if (deltaX > 0 && touchStartX < 50) {
+        // Swiped right from left edge -> Open drawer
+        setIsMobileSidebarOpen(true);
+      } else if (deltaX < 0 && isMobileSidebarOpen) {
+        // Swiped left while open -> Close drawer
+        setIsMobileSidebarOpen(false);
+      }
+    }
+    setTouchStartX(null);
+    setTouchStartY(null);
+  };
+
+  const userRole = 'butcher';
+  const currentStore = getEffectiveStore(stores, userRole, selectedStoreIdForMd, currentUser?.storeId);
+  const effectiveStoreId = currentStore.id;
+
+  // Store-isolated datasets for operational screens
+  const storeItems = items.filter((i) => matchStoreEntity(i.storeId, currentStore));
+  const storeSegments = segments.filter((s) => matchStoreEntity(s.storeId, currentStore));
+  const storeAdjustments = adjustments.filter((a) => matchStoreEntity(a.storeId, currentStore));
+  const storeClosingRecords = closingRecords.filter((r) => matchStoreEntity(r.storeId, currentStore));
+  const storeReports = reports.filter((r) => matchStoreEntity(r.storeId, currentStore));
+
+  // Nav Items configured for Butcher operational workflow + HPP Calculator
+  const navItems = [
+    {
+      id: 'dashboard',
+      label: 'Input & Thawing',
+      icon: LayoutDashboard,
+      color: 'text-red-500',
+    },
+    {
+      id: 'antrian',
+      label: 'Antrian Thawing',
+      icon: Clock,
+      color: 'text-amber-500',
+      count: storeItems.filter((i) => !i.status || i.status.toLowerCase() === 'thawing' || i.status.toLowerCase() === 'sedang thawing' || i.status.toLowerCase() === 'antrian').length,
+    },
+    {
+      id: 'segmentasi',
+      label: 'Segmentasi Potong',
+      icon: Scissors,
+      color: 'text-blue-500',
+    },
+    {
+      id: 'sales',
+      label: 'Update Penjualan',
+      icon: DollarSign,
+      color: 'text-emerald-500',
+    },
+    {
+      id: 'closing_butcher',
+      label: 'Menu Closing',
+      icon: CheckSquare,
+      color: 'text-rose-500',
+    },
+    {
+      id: 'hpp_calculator',
+      label: 'Kalkulator HPP & Rekomendasi Harga',
+      icon: Calculator,
+      color: 'text-emerald-500',
+    },
+    {
+      id: 'riwayat',
+      label: 'Riwayat Harian',
+      icon: History,
+      color: 'text-slate-500',
+    },
+  ];
+
+  const allowedNavItems = navItems;
+
+  return (
+    <div
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+      className="min-h-screen bg-slate-100 flex font-sans relative"
+    >
+      {/* 1. PERMANENT DESKTOP SIDEBAR (Clean sidebar replaces double top-nav) */}
+      <aside className="hidden lg:flex flex-col w-64 bg-slate-900 text-white border-r border-slate-800 sticky top-0 h-screen z-40 shrink-0">
+        {/* Brand Header */}
+        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-red-600 rounded-xl text-white shadow-md flex items-center justify-center">
+              <Beef className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="font-black text-sm tracking-tight text-white">TDN Tracker</span>
+                <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-red-950 text-red-300 border border-red-800 uppercase">
+                  {currentStore.code}
+                </span>
+              </div>
+              <span className="text-[11px] text-slate-400 font-medium truncate block max-w-[140px]">
+                {currentStore.name}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* User Card Profile (Butcher Only) */}
+        <div className="p-3.5 mx-3 my-3 rounded-xl bg-slate-800/80 border border-slate-700/80 flex items-center justify-between">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black text-white shrink-0 bg-red-600">
+              B
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-white truncate">Petugas Butcher</div>
+              <div className="text-[10px] text-red-300 font-semibold uppercase">
+                Akun Butcher Aktif
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Store Branch Switcher */}
+        {stores.length > 0 && (
+          <div className="px-3 pb-2">
+            <div className="p-2 rounded-xl bg-slate-800/60 border border-slate-700/60">
+              <label className="text-[10px] font-bold text-red-400 uppercase tracking-wider block mb-1 flex items-center gap-1">
+                <Building2 className="w-3 h-3 text-red-400" />
+                Cabang Toko Aktif:
+              </label>
+              <select
+                value={selectedStoreIdForMd}
+                onChange={(e) => setSelectedStoreIdForMd(e.target.value)}
+                className="w-full text-xs font-bold bg-slate-900 border border-slate-700 text-slate-200 rounded-lg p-1.5 focus:ring-1 focus:ring-red-500 focus:outline-none cursor-pointer"
+              >
+                {stores.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.code} - {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
+
+        {/* Navigation Item List */}
+        <div className="flex-1 px-3 space-y-1 overflow-y-auto scrollbar-none">
+          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider px-3 pt-2 pb-1">
+            Modul Butcher
+          </div>
+          {allowedNavItems.map((tab) => {
+            const Icon = tab.icon;
+            const isActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-bold transition text-left cursor-pointer ${
+                  isActive
+                    ? 'bg-red-600 text-white shadow-md'
+                    : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Icon className={`w-4 h-4 ${isActive ? 'text-white' : tab.color}`} />
+                  <span>{tab.label}</span>
+                </div>
+                {tab.count !== undefined && tab.count > 0 && (
+                  <span
+                    className={`px-2 py-0.2 rounded-full text-[10px] font-extrabold ${
+                      isActive ? 'bg-red-800 text-white' : 'bg-red-600 text-white'
+                    }`}
+                  >
+                    {tab.count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Bottom System Controls */}
+        <div className="p-3 border-t border-slate-800 space-y-2">
+          <div
+            className="w-full py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-between border bg-slate-800/80 border-slate-700 text-slate-300"
+            title="Sistem Lokal Aktif"
+          >
+            <div className="flex items-center gap-2">
+              <Database className="w-4 h-4 text-emerald-400" />
+              <span>{backendConnected ? 'Sistem Aktif' : 'Penyimpanan Lokal'}</span>
+            </div>
+            <span className={`w-2 h-2 rounded-full ${backendConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+          </div>
+
+          {/* Spreadsheet Database Integration Button */}
+          <button
+            type="button"
+            onClick={() => setShowAppsScriptModal(true)}
+            className="w-full py-2.5 px-3 bg-gradient-to-r from-emerald-950 via-slate-900 to-emerald-950 hover:from-emerald-900 hover:to-slate-800 border border-emerald-700/60 hover:border-emerald-400 text-emerald-300 rounded-xl text-xs font-bold transition flex items-center justify-between cursor-pointer shadow-sm active:scale-95"
+            title="Integrasi Database Spreadsheet AppScript"
+          >
+            <div className="flex items-center gap-2">
+              <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+              <span>Database Spreadsheet</span>
+            </div>
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          </button>
+        </div>
+      </aside>
+
+      {/* 2. MOBILE TOP BAR (Only visible on mobile / tablet to toggle drawer) */}
+      <div className="flex-1 flex flex-col min-w-0">
+        <header className="lg:hidden bg-slate-900 text-white border-b border-slate-800 sticky top-0 z-40 px-4 py-3 flex items-center justify-between shadow-sm">
+          <div className="flex items-center gap-3">
+            {/* Hamburger Button for Mobile Drawer */}
+            <button
+              onClick={() => setIsMobileSidebarOpen(true)}
+              className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
+              aria-label="Buka Menu Navigasi"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-red-600 rounded-lg text-white">
+                <Beef className="w-4 h-4" />
+              </div>
+              <span className="font-black text-sm text-white">TDN Tracker</span>
+              <span className="px-1.5 py-0.2 rounded text-[9px] font-extrabold bg-red-950 text-red-300 border border-red-800 uppercase">
+                {currentStore.code}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowAppsScriptModal(true)}
+              className="p-2 rounded-lg border text-xs font-bold flex items-center gap-1.5 bg-slate-800 border-emerald-600/40 text-emerald-300 hover:bg-slate-700 transition cursor-pointer"
+              title="Database Spreadsheet AppScript (Klik untuk buka pengaturan/status)"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden sm:inline text-[11px]">Spreadsheet</span>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            </button>
+
+            <div
+              className="p-2 rounded-lg border text-xs font-bold flex items-center gap-1.5 bg-slate-800 border-slate-700 text-slate-300"
+              title={backendConnected ? 'Sistem Aktif' : 'Penyimpanan Lokal'}
+            >
+              <Database className="w-3.5 h-3.5 text-emerald-400" />
+              <span className={`w-1.5 h-1.5 rounded-full ${backendConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+            </div>
+
+            <div className="px-2.5 py-1.5 bg-red-950/80 border border-red-800 text-red-300 rounded-lg text-xs font-bold">
+              Butcher
+            </div>
+          </div>
+        </header>
+
+        {/* 3. MOBILE SLIDE-OUT DRAWER / SIDEBAR (Swipeable & Overlay Navigation) */}
+        {isMobileSidebarOpen && (
+          <div className="fixed inset-0 z-50 lg:hidden flex">
+            {/* Backdrop overlay */}
+            <div
+              onClick={() => setIsMobileSidebarOpen(false)}
+              className="fixed inset-0 bg-slate-950/80 backdrop-blur-xs transition-opacity"
+            />
+
+            {/* Slide-out Sidebar Panel */}
+            <div className="relative flex-1 flex flex-col max-w-xs w-full bg-slate-900 text-white p-5 space-y-4 shadow-2xl z-10 animate-in slide-in-from-left duration-200">
+              {/* Header Drawer */}
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-red-600 rounded-xl text-white">
+                    <Beef className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-black text-white">Menu Navigasi</h3>
+                    <p className="text-[11px] text-slate-400">{currentStore.name}</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIsMobileSidebarOpen(false)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg bg-slate-800 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Current User Card in Drawer */}
+              <div className="p-3 rounded-xl bg-slate-800/80 border border-slate-700/80 flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black text-white bg-red-600">
+                    B
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-white">Petugas Butcher</div>
+                    <div className="text-[10px] text-red-300 font-semibold uppercase">
+                      Akun Butcher Aktif
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Store Switcher in Drawer */}
+              {stores.length > 0 && (
+                <div className="p-2 rounded-xl bg-slate-800/60 border border-slate-700/60">
+                  <label className="text-[10px] font-bold text-red-400 uppercase tracking-wider block mb-1 flex items-center gap-1">
+                    <Building2 className="w-3 h-3 text-red-400" />
+                    Cabang Toko:
+                  </label>
+                  <select
+                    value={selectedStoreIdForMd}
+                    onChange={(e) => setSelectedStoreIdForMd(e.target.value)}
+                    className="w-full text-xs font-bold bg-slate-900 border border-slate-700 text-red-200 rounded-lg p-1.5 focus:ring-1 focus:ring-red-500 focus:outline-none"
+                  >
+                    {stores.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.code} - {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Nav list */}
+              <div className="space-y-1.5 overflow-y-auto flex-1">
+                <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider px-2 mb-1">
+                  Modul Sistem
+                </div>
+                {allowedNavItems.map((tab) => {
+                  const Icon = tab.icon;
+                  const isActive = activeTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => {
+                        setActiveTab(tab.id);
+                        setIsMobileSidebarOpen(false);
+                      }}
+                      className={`w-full flex items-center justify-between px-3.5 py-3 rounded-xl text-xs font-bold transition text-left ${
+                        isActive
+                          ? 'bg-red-600 text-white shadow-md'
+                          : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Icon className={`w-4 h-4 ${isActive ? 'text-white' : tab.color}`} />
+                        <span>{tab.label}</span>
+                      </div>
+                      {tab.count !== undefined && tab.count > 0 && (
+                        <span className="px-2 py-0.5 bg-red-800 text-white rounded-full text-[10px]">
+                          {tab.count}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Drawer Functional Controls */}
+              <div className="pt-4 border-t border-slate-800 space-y-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAppsScriptModal(true);
+                    setIsMobileSidebarOpen(false);
+                  }}
+                  className="w-full py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-between border bg-gradient-to-r from-emerald-950 via-slate-900 to-emerald-950 border-emerald-700/60 text-emerald-300 cursor-pointer transition"
+                >
+                  <div className="flex items-center gap-2">
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+                    <span>Database Spreadsheet</span>
+                  </div>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                </button>
+
+                <div className="w-full py-2.5 px-3 bg-slate-800/80 border border-slate-700/80 text-red-300 rounded-xl text-xs font-bold flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <User className="w-4 h-4 text-red-400" />
+                    <span>Akun Butcher Aktif</span>
+                  </div>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 4. MAIN CONTENT VIEW CONTAINER */}
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          {/* VIEW 1: Input & Thawing (Dashboard) */}
+          {activeTab === 'dashboard' && (
+            <Dashboard
+              items={storeItems}
+              segments={storeSegments}
+              currentStore={currentStore}
+              onAddItem={handleAddItem}
+              onUpdateItem={handleUpdateItem}
+              onDeleteItem={handleDeleteItem}
+              safeThawingLossPercent={lossConfig.safeThawingLossPercent}
+              safeFabricationLossPercent={lossConfig.safeFabricationLossPercent}
+              salesPredictionKg={lossConfig.salesPredictionKg}
+              onUpdateSalesPrediction={handleUpdateSalesPrediction}
+              onTransferPurpose={handleTransferPurpose}
+              onOpenTransferModal={() => setIsTransferModalOpen(true)}
+              onOpenEditPlanModal={(id) => {
+                setEditPlanItemId(id || null);
+                setIsEditPlanModalOpen(true);
+              }}
+              isButcherView={currentUser.role === 'butcher'}
+              grnRecords={grnRecords}
+              closingRecords={storeClosingRecords}
+              adjustments={storeAdjustments}
+              onSaveGrn={handleSaveGrn}
+              onSaveSales={handleUpdateSalesList}
+              onNavigateToClosing={(cat) => {
+                if (cat) setActiveReportCategory(cat);
+                setActiveTab('closing_butcher');
+              }}
+              onNavigateToHpp={() => setActiveTab('hpp_calculator')}
+              initialCategory={activeReportCategory}
+              onCategoryChange={setActiveReportCategory}
+            />
+          )}
+
+          {/* VIEW 2: Antrean Potong */}
+          {activeTab === 'antrian' && (
+            <AntrianPabrikasi
+              items={storeItems}
+              onStartFabrication={handleStartFabrication}
+              safeThawingLossPercent={lossConfig.safeThawingLossPercent}
+              onTransferPurpose={handleTransferPurpose}
+              onOpenTransferModal={() => setIsTransferModalOpen(true)}
+              onAddItem={handleAddItem}
+              onNavigateToSegmentasi={() => setActiveTab('segmentasi')}
+            />
+          )}
+
+          {/* VIEW 3: Segmentasi Potong */}
+          {activeTab === 'segmentasi' && (
+            <SegmentasiPabrikasi
+              items={storeItems}
+              existingSegments={storeSegments}
+              onSaveSegments={handleSaveSegments}
+              onUpdateItem={handleUpdateItem}
+              safeFabricationLossPercent={lossConfig.safeFabricationLossPercent}
+              onTransferPurpose={handleTransferPurpose}
+              onOpenTransferModal={() => setIsTransferModalOpen(true)}
+              onOpenEditPlanModal={(id) => {
+                setEditPlanItemId(id || null);
+                setIsEditPlanModalOpen(true);
+              }}
+              onNavigateToClosing={() => setActiveTab('closing_butcher')}
+            />
+          )}
+
+          {/* VIEW 3.5: Closing Rencana Potong (Mandatory Photo Upload & Physical Sisa Stock) */}
+          {activeTab === 'closing_butcher' && (
+            <ButcherClosingView
+              currentUser={currentUser}
+              currentStore={currentStore}
+              stores={stores}
+              selectedStoreIdForMd={selectedStoreIdForMd}
+              onSelectStoreForMd={setSelectedStoreIdForMd}
+              segments={storeSegments}
+              items={storeItems}
+              adjustments={storeAdjustments}
+              onSaveClosingRecord={handleSaveClosingRecord}
+              existingClosingRecords={storeClosingRecords}
+              onDailyResetAndCarryover={handleDailyResetAndCarryover}
+              onManualSync={() => fetchAllData(false)}
+              isSyncing={isRefreshing}
+              lastSyncTime={null}
+              onNavigateToRiwayat={() => setActiveTab('riwayat')}
+              grnRecords={grnRecords}
+              onSaveGrn={handleSaveGrn}
+              activeReportCategory={activeReportCategory}
+              onCategoryChange={setActiveReportCategory}
+            />
+          )}
+
+          {/* VIEW 4: Update Sales */}
+          {activeTab === 'sales' && (
+            <UpdateSales
+              segments={storeSegments}
+              items={storeItems}
+              closingRecords={storeClosingRecords}
+              adjustments={storeAdjustments}
+              onUpdateSales={handleUpdateSales}
+              onTransferPurpose={handleTransferPurpose}
+              onOpenTransferModal={() => setIsTransferModalOpen(true)}
+            />
+          )}
+
+          {/* VIEW 5: Kalkulator & Pencatatan HPP Otomatis Terintegrasi Susut Bergerak */}
+          {activeTab === 'hpp_calculator' && (
+            <HppCalculatorView
+              items={storeItems}
+              currentStore={currentStore}
+            />
+          )}
+
+          {/* VIEW 6: Riwayat Harian */}
+          {activeTab === 'riwayat' && (
+            <RiwayatHarian
+              items={storeItems}
+              segments={storeSegments}
+              reports={storeReports}
+              closingRecords={storeClosingRecords}
+              adjustments={storeAdjustments}
+              cogsList={cogsList}
+              currentStore={currentStore}
+              onCloseDay={handleSaveDailyReport}
+              onDeleteReport={handleDeleteReport}
+              onNavigateToClosing={() => setActiveTab('closing_butcher')}
+            />
+          )}
+        </main>
+
+        {/* Footer */}
+        <footer className="bg-white border-t border-slate-200 py-4 mt-auto">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
+            <div>
+              TDN Meat Production Tracker © 2026 • Petugas Aktif:{' '}
+              <strong className="text-slate-800">{currentUser.fullName}</strong> ({currentUser.role.toUpperCase()}) • {currentStore.name}
+            </div>
+            <button
+              onClick={handleResetData}
+              className="text-slate-400 hover:text-red-600 transition flex items-center gap-1.5 cursor-pointer"
+              title="Kembalikan data ke contoh default"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Reset Data Lokal
+            </button>
+          </div>
+        </footer>
+      </div>
+
+      {/* MODAL 1: Transfer Purpose (Pesanan <-> Display) */}
+      <TransferPurposeModal
+        isOpen={isTransferModalOpen}
+        onClose={() => setIsTransferModalOpen(false)}
+        items={items}
+        segments={segments}
+        onTransferPurpose={handleTransferPurpose}
+      />
+
+      {/* MODAL 2: Edit Rencana Potong */}
+      <EditRencanaPotongModal
+        isOpen={isEditPlanModalOpen}
+        onClose={() => setIsEditPlanModalOpen(false)}
+        items={items}
+        segments={segments}
+        onUpdatePlan={handleUpdatePlan}
+        preselectedItemId={editPlanItemId}
+      />
+
+      {/* MODAL 3: PENGATURAN AKUN & MANAJEMEN TOKO */}
+      {showAccountModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 space-y-6 my-8">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-slate-900 text-white rounded-xl">
+                  <Settings className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-slate-900">
+                    Manajemen Toko & Akun SQL
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Tambah toko cabang baru dan akun Butcher & Admin Toko dengan password masing-masing.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowAccountModal(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* List Akun Terdaftar per Toko */}
+            <div className="space-y-3">
+              <span className="text-xs font-bold text-slate-800 uppercase tracking-wider block">
+                Daftar Pengguna di Database SQL:
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-60 overflow-y-auto pr-1">
+                {users.map((u) => {
+                  const isCurrent = currentUser.id === u.id;
+                  return (
+                    <div
+                      key={u.id}
+                      className={`p-3 rounded-xl border flex items-center justify-between ${
+                        isCurrent
+                          ? 'border-emerald-600 bg-emerald-50/80 shadow-xs'
+                          : 'border-slate-200 bg-slate-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div
+                          className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black text-white ${
+                            u.role === 'butcher'
+                              ? 'bg-red-700'
+                              : u.role === 'admin'
+                              ? 'bg-blue-700'
+                              : 'bg-emerald-700'
+                          }`}
+                        >
+                          {u.fullName.charAt(0)}
+                        </div>
+                        <div>
+                          <div className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
+                            {u.fullName}
+                            {isCurrent && (
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 inline" />
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            {u.role.toUpperCase()} • {u.storeName || 'Pusat'}
+                          </div>
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-white border border-slate-200 text-slate-700">
+                        {u.username}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Form Tambah Toko Cabang Baru */}
+            <div className="border-t border-slate-100 pt-4 space-y-3">
+              <span className="text-xs font-bold text-slate-800 uppercase tracking-wider block">
+                + Daftarkan Toko Baru & Buat Kredensial SQL:
+              </span>
+
+              {addStoreSuccess && (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 text-xs font-bold flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  Toko baru dan 2 akun (Butcher & Admin) berhasil didaftarkan ke SQL!
+                </div>
+              )}
+
+              <form onSubmit={handleModalAddStore} className="space-y-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Kode:
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="SMG"
+                      maxLength={4}
+                      value={newStoreCode}
+                      onChange={(e) => setNewStoreCode(e.target.value)}
+                      className="w-full text-xs p-2 bg-white border border-slate-300 rounded-lg font-mono font-bold uppercase"
+                      required
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Nama Toko:
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="TDN Semarang"
+                      value={newStoreName}
+                      onChange={(e) => setNewStoreName(e.target.value)}
+                      className="w-full text-xs p-2 bg-white border border-slate-300 rounded-lg font-bold"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    Kota / Wilayah:
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Semarang"
+                    value={newStoreCity}
+                    onChange={(e) => setNewStoreCity(e.target.value)}
+                    className="w-full text-xs p-2 bg-white border border-slate-300 rounded-lg"
+                    required
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                      Nama Butcher:
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Joko Butcher"
+                      value={newButcherName}
+                      onChange={(e) => setNewButcherName(e.target.value)}
+                      className="w-full text-xs p-2 bg-white border border-slate-300 rounded-lg mb-1.5"
+                      required
+                    />
+                    <input
+                      type="password"
+                      placeholder="Password Butcher"
+                      value={newButcherPassword}
+                      onChange={(e) => setNewButcherPassword(e.target.value)}
+                      className="w-full text-xs p-2 bg-white border border-slate-300 rounded-lg font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                      Nama Admin:
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Anita Admin"
+                      value={newAdminName}
+                      onChange={(e) => setNewAdminName(e.target.value)}
+                      className="w-full text-xs p-2 bg-white border border-slate-300 rounded-lg mb-1.5"
+                      required
+                    />
+                    <input
+                      type="password"
+                      placeholder="Password Admin"
+                      value={newAdminPassword}
+                      onChange={(e) => setNewAdminPassword(e.target.value)}
+                      className="w-full text-xs p-2 bg-white border border-slate-300 rounded-lg font-mono"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 bg-slate-900 hover:bg-black text-white rounded-lg text-xs font-bold shadow transition mt-2 cursor-pointer"
+                >
+                  + Simpan & Buat 2 Akun
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 8. GOOGLE APPS SCRIPT SPREADSHEET DATABASE MODAL */}
+      <AppsScriptDatabaseModal
+        isOpen={showAppsScriptModal}
+        onClose={() => setShowAppsScriptModal(false)}
+        onRefreshAllData={fetchAllData}
+        counts={{
+          stores: stores.length,
+          users: users.length,
+          cogs: cogsList.length,
+          thawing: items.length,
+          segments: segments.length,
+          closing: closingRecords.length,
+          grn: grnRecords.length,
+          adjustments: adjustments.length,
+          reports: reports.length,
+          susut: 0,
+        }}
+      />
+    </div>
+  );
+}
