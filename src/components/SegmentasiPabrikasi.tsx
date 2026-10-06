@@ -86,18 +86,22 @@ export default function SegmentasiPabrikasi({
   ]);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Custom Cutting Plans State
+  // Custom Cutting Plans State aligned with standard 4 cuts (Prime, Secondary, Tertiary, Trimming)
   const defaultPlans = [
-    'D.sapi pot. rdang',
-    'Daging Rendang Shankle',
-    'D Premium lokal',
-    'Rawon Curah',
-    'D.r. fresh member',
-    'FRIBOY / Daging Prem 2',
+    'Tenderloin / Has Dalam (Prime Cuts)',
+    'Sirloin / Has Luar (Prime Cuts)',
+    'Ribeye / Lamusir (Prime Cuts)',
+    'Chuck / Knuckle Paha (Secondary Cuts)',
+    'Topside / Gandik (Secondary Cuts)',
+    'Brisket Sandung Lamur (Secondary Cuts)',
+    'Sengkel / Shankle (Tertiary Cuts)',
+    'Iga / Short Ribs (Tertiary Cuts)',
+    'Rawon / Oxtail Sup (Tertiary Cuts)',
+    'Tetelan / Daging Giling (Trimming)',
   ];
   const [customPlans, setCustomPlans] = useState<string[]>(() => {
     try {
-      const saved = localStorage.getItem('butcher_custom_plans');
+      const saved = localStorage.getItem('meat_tracker_custom_plans');
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];

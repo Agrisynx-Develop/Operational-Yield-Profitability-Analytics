@@ -60,13 +60,14 @@ export interface ThawingBatch {
   notes?: string;
 }
 
-export type ReportCategory = 'DAGING';
+export type ReportCategory = 'DAGING' | 'KENTANG_SOSIS_DORI' | 'PARTING_AYAM';
 
 export interface GrnRecord {
   id: string;
   storeId?: string;
   date: string; // YYYY-MM-DD
   reportCategory?: string;
+  subCategory?: string;
   itemCode?: string;
   plu?: string;
   productName: string;
@@ -81,6 +82,10 @@ export interface GrnRecord {
   nettoKg?: number;
   costPerKg?: number;
   sellingPricePerKg?: number;
+  susutBeliKg?: number;
+  susutRealKg?: number;
+  susutPercent?: number;
+  photoUrl?: string;
 }
 
 export interface StockAdjustment {
@@ -107,6 +112,7 @@ export interface ClosingPlanRecord {
   date: string; // YYYY-MM-DD
   planName: string;
   category: string;
+  subCategory?: string;
   cutCategory?: CutSegmentCategory; // Prime Cuts | Secondary Cuts | Tertiary Cuts | Trimming
   brand?: string; // Merk bahan (e.g. Swift, Teys, Kilcoy, Santori, Lokal)
   reportCategory?: ReportCategory;
@@ -125,9 +131,22 @@ export interface ClosingPlanRecord {
   susutJualKg: number;
   photoUrl: string; // Bukti timbangan fisik
   photoCaption?: string;
+  displayPhotoUrl?: string;
+  tallyKg?: number;
+  brutoKg?: number;
+  nettoKg?: number;
+  costPerKg?: number;
+  sellingPricePerKg?: number;
+  gpPercent?: number;
+  costReal?: number;
+  susutBeliKg?: number;
+  susutRealKg?: number;
+  valueReal?: number;
+  valueProcess?: number;
+  susutPercent?: number;
   note?: string;
   isUnopened?: boolean;
-  operatorName: string;
+  operatorName?: string;
   butcherName?: string;
   timestamp: string;
 }
@@ -142,8 +161,8 @@ export interface ThawingItem {
   storeName?: string;
   image: string; // Base64 or URL foto timbangan
   name: string; // Nama bahan daging
-  brand: string; // Merk bahan (e.g. Swift, Teys, Kilcoy, Santori, Lokal)
-  itemCode: string; // Kode item (e.g. DGS-01)
+  brand?: string; // Merk bahan (e.g. Swift, Teys, Kilcoy, Santori, Lokal)
+  itemCode?: string; // Kode item (e.g. DGS-01)
   pricePerKg?: number; // Harga per Kg spesifik bahan (Rp)
   cogsPerKg?: number;
   weightBeforeThawing: number; // Berat sebelum thawing (Kg)
@@ -151,7 +170,7 @@ export interface ThawingItem {
   cutCategory?: CutSegmentCategory; // 'Prime Cuts' | 'Secondary Cuts' | 'Tertiary Cuts' | 'Trimming'
   plannedFabrication: string; // Rencana potongan
   status: 'thawing' | 'pabrikasi_ready' | 'pabrikasi_done';
-  thawingDate: string; // YYYY-MM-DD (akurat)
+  thawingDate?: string; // YYYY-MM-DD (akurat)
   thawingStartTime: string; // ISO String lengkap tanggal + jam detik
   thawingEndTime?: string; // ISO String lengkap tanggal + jam detik
   durationMinutes?: number;
@@ -178,10 +197,10 @@ export interface FabricationSegment {
   batchId?: string; // Relasi ke batch
   batchPurpose?: string;
   itemName: string;
-  brand: string; // Merk bahan
-  itemCode: string; // Kode item
+  brand?: string; // Merk bahan
+  itemCode?: string; // Kode item
   segmentName: string; // Nama potongan
-  cutCategory: CutSegmentCategory; // Prime Cuts | Secondary Cuts | Tertiary Cuts | Trimming
+  cutCategory?: CutSegmentCategory; // Prime Cuts | Secondary Cuts | Tertiary Cuts | Trimming
   targetWeight: number; // Rencana berat (Kg)
   actualWeight: number; // Berat realisasi / Sisa Stok Aktif (Kg)
   periodicShrinkage: number; // Total susut berkala yang diupdate (Kg)

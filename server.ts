@@ -51,7 +51,7 @@ const inMemoryStore = {
   ],
   users: [
     { id: '1', username: 'yield_operator', password: 'operator123', role: 'butcher', storeId: '1', storeName: 'Operational Processing Hub', fullName: 'Yield & Production Operator', createdAt: '2026-01-01' },
-  ],
+  ] as any[],
   batches: [] as any[],
   cogsMaster: [] as any[],
   thawingItems: [] as any[],
@@ -529,8 +529,8 @@ async function startServer() {
     }
   }, 20000);
 
-  // Remove and drop database tables if external database connection is present
-  dropDatabaseTables();
+  // Database structure drop is available via explicit POST /api/database/drop-structure endpoint
+  // dropDatabaseTables();
 
   // Endpoint to explicitly drop and delete entire database structure
   app.post('/api/database/drop-structure', async (req, res) => {
@@ -1155,9 +1155,74 @@ async function startServer() {
     res.json(filtered);
   });
 
+  function checkAndUpdateBatchCompletion(batchId?: string) {
+    if (!batchId) return;
+    const batch = inMemoryStore.batches.find((b: any) => b.id === batchId);
+    if (!batch) return;
+
+    const batchItems = inMemoryStore.thawingItems.filter((i: any) => i.batchId === batchId);
+    if (batchItems.length === 0) return;
+
+    const allSegmented = batchItems.length > 0 && batchItems.every((i: any) => i.status === 'pabrikasi_done');
+    const totalRaw = batchItems.reduce((acc: number, i: any) => acc + (Number(i.weightBeforeThawing) || 0), 0);
+    const totalThawed = batchItems.reduce((acc: number, i: any) => acc + (Number(i.weightAfterThawing) || Number(i.weightBeforeThawing) || 0), 0);
+    const loss = Math.max(0, totalRaw - totalThawed);
+    const lossPct = totalRaw > 0 ? (loss / totalRaw) * 100 : 0;
+
+    batch.totalRawKg = Number(totalRaw.toFixed(3));
+    batch.totalThawedKg = Number(totalThawed.toFixed(3));
+    batch.shrinkageKg = Number(loss.toFixed(3));
+    batch.shrinkagePercent = Number(lossPct.toFixed(2));
+    batch.itemCount = batchItems.length;
+
+    if (allSegmented) {
+      batch.status = 'COMPLETED_CUT';
+      if (!batch.completedTime) batch.completedTime = new Date().toISOString();
+      batchItems.forEach((i: any) => { i.batchStatus = 'COMPLETED_CUT'; });
+    } else {
+      const anyThawed = batchItems.some((i: any) => i.weightAfterThawing !== null && i.weightAfterThawing !== undefined);
+      batch.status = anyThawed ? 'PABRIKASI_READY' : 'THAWING_ACTIVE';
+      batchItems.forEach((i: any) => { i.batchStatus = 'OPEN'; });
+    }
+  }
+
   app.post('/api/thawing-items', async (req, res) => {
     try {
-      const items = Array.isArray(req.body) ? req.body : [req.body];
+      const rawIncoming = Array.isArray(req.body) ? req.body : [req.body];
+      const items = rawIncoming.map((item: any) => {
+        const rawW = Number(item.weightBeforeThawing) || 0;
+        let thawedW = item.weightAfterThawing !== null && item.weightAfterThawing !== undefined && item.weightAfterThawing !== '' ? Number(item.weightAfterThawing) : null;
+        const startTime = item.thawingStartTime || item.createdAt || new Date().toISOString();
+        let endTime = item.thawingEndTime || null;
+        let durationMin = item.durationMinutes || 0;
+
+        let shrinkKg = null;
+        let shrinkPct = null;
+
+        if (thawedW !== null) {
+          if (!endTime) endTime = new Date().toISOString();
+          const startMs = new Date(startTime).getTime();
+          const endMs = new Date(endTime).getTime();
+          if (!isNaN(startMs) && !isNaN(endMs) && endMs > startMs) {
+            durationMin = Math.max(1, Math.round((endMs - startMs) / 60000));
+          }
+          shrinkKg = Math.max(0, Number((rawW - thawedW).toFixed(3)));
+          shrinkPct = rawW > 0 ? Number(((shrinkKg / rawW) * 100).toFixed(2)) : 0;
+        }
+
+        return {
+          ...item,
+          weightBeforeThawing: rawW,
+          weightAfterThawing: thawedW,
+          shrinkageThawing: shrinkKg,
+          shrinkageThawingPercent: shrinkPct,
+          thawingStartTime: startTime,
+          thawingEndTime: endTime,
+          durationMinutes: durationMin,
+          status: item.status || (thawedW !== null ? 'pabrikasi_ready' : 'thawing'),
+          createdAt: item.createdAt || new Date().toISOString(),
+        };
+      });
       const p = getPool();
       if (p) {
         try {
@@ -1191,9 +1256,11 @@ async function startServer() {
           console.error('Postgres save thawing items error:', dbErr);
         }
       }
-      const incoming = Array.isArray(req.body) ? req.body : [req.body];
+      const incoming = items;
+      const affectedBatchIds = new Set<string>();
       incoming.forEach((item: any) => {
         if (!item || !item.id) return;
+        if (item.batchId) affectedBatchIds.add(item.batchId);
         const idx = inMemoryStore.thawingItems.findIndex((i) => i.id === item.id);
         if (idx >= 0) {
           inMemoryStore.thawingItems[idx] = { ...inMemoryStore.thawingItems[idx], ...item };
@@ -1201,9 +1268,12 @@ async function startServer() {
           inMemoryStore.thawingItems.unshift(item);
         }
       });
+      affectedBatchIds.forEach((bId) => {
+        checkAndUpdateBatchCompletion(bId);
+      });
       persistStoreToDisk();
       pushTableMutationToAppsScript('Thawing_Daging', incoming);
-      res.json({ success: true, items: inMemoryStore.thawingItems });
+      res.json({ success: true, items: inMemoryStore.thawingItems, batches: inMemoryStore.batches });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1288,8 +1358,10 @@ async function startServer() {
         }
       }
       const incoming = Array.isArray(req.body) ? req.body : [req.body];
+      const affectedItemIds = new Set<string>();
       incoming.forEach((seg: any) => {
         if (!seg || !seg.id) return;
+        if (seg.itemId) affectedItemIds.add(seg.itemId);
         const idx = inMemoryStore.fabricationSegments.findIndex((s) => s.id === seg.id);
         if (idx >= 0) {
           inMemoryStore.fabricationSegments[idx] = { ...inMemoryStore.fabricationSegments[idx], ...seg };
@@ -1297,9 +1369,60 @@ async function startServer() {
           inMemoryStore.fabricationSegments.unshift(seg);
         }
       });
+
+      // Mark thawing items as pabrikasi_done and evaluate batch completion
+      const affectedBatchIds = new Set<string>();
+      affectedItemIds.forEach((itemId) => {
+        const item = inMemoryStore.thawingItems.find((i) => i.id === itemId);
+        if (item) {
+          item.status = 'pabrikasi_done';
+          if (item.batchId) affectedBatchIds.add(item.batchId);
+        }
+      });
+
+      affectedBatchIds.forEach((bId) => {
+        checkAndUpdateBatchCompletion(bId);
+      });
+
       persistStoreToDisk();
       pushTableMutationToAppsScript('Pabrikasi_Segmen', incoming);
-      res.json({ success: true, segments: inMemoryStore.fabricationSegments });
+      res.json({ success: true, segments: inMemoryStore.fabricationSegments, batches: inMemoryStore.batches });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ----------------- THAWING BATCHES API -----------------
+  app.get('/api/batches', (req, res) => {
+    res.json(inMemoryStore.batches);
+  });
+
+  app.post('/api/batches', (req, res) => {
+    try {
+      const incoming = Array.isArray(req.body) ? req.body : [req.body];
+      incoming.forEach((b: any) => {
+        if (!b || !b.id) return;
+        const idx = inMemoryStore.batches.findIndex((existing) => existing.id === b.id);
+        if (idx >= 0) {
+          inMemoryStore.batches[idx] = { ...inMemoryStore.batches[idx], ...b };
+        } else {
+          inMemoryStore.batches.unshift(b);
+        }
+        checkAndUpdateBatchCompletion(b.id);
+      });
+      persistStoreToDisk();
+      res.json({ success: true, batches: inMemoryStore.batches });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/batches/:id', (req, res) => {
+    try {
+      const id = req.params.id;
+      inMemoryStore.batches = inMemoryStore.batches.filter((b) => b.id !== id);
+      persistStoreToDisk();
+      res.json({ success: true, batches: inMemoryStore.batches });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -2019,7 +2142,7 @@ async function startServer() {
   });
 
   // ----------------- OPERATIONAL YIELD & PROFITABILITY ANALYTICS (PYTHON 3.10) -----------------
-  app.post('/api/python/yield-analytics', (req, res) => {
+  const handlePythonAnalytics = (req: any, res: any) => {
     try {
       const payload = {
         items: req.body?.items || inMemoryStore.thawingItems,
@@ -2060,7 +2183,10 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
-  });
+  };
+
+  app.post('/api/python/yield-analytics', handlePythonAnalytics);
+  app.post('/api/python-analytics/calculate', handlePythonAnalytics);
 
   // ----------------- PYTHON TRAINED ML MODELS API (.pkl, .joblib, dll) -----------------
   app.get('/api/python-models', (req, res) => {

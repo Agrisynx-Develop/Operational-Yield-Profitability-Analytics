@@ -14,6 +14,7 @@ import {
   SalesPredictionModelConfig,
   PythonModelArtifact,
   GrnRecord,
+  ThawingBatch,
 } from '../types';
 import { normalizePlanName, getDeterministicClosingRecordId } from './storeHelper';
 
@@ -99,8 +100,8 @@ export function resolveUserFromInput(usernameInput: any): UserAccount {
     matchedStore = allStores[0];
   }
 
-  const codeLower = matchedStore?.code.toLowerCase() || 'ckr';
-  const storeName = matchedStore?.name || 'TDN CKR';
+  const codeLower = matchedStore?.code.toLowerCase() || 'hub';
+  const storeName = matchedStore?.name || 'Operational Processing Hub';
   const storeId = matchedStore?.id || '1';
   const partnerRole = role === 'butcher' ? 'admin' : 'butcher';
 
@@ -110,7 +111,7 @@ export function resolveUserFromInput(usernameInput: any): UserAccount {
     role,
     storeId,
     storeName,
-    fullName: `${role === 'butcher' ? 'Butcher' : 'Admin'} ${storeName}`,
+    fullName: `Operator Produksi (${storeName})`,
     linkedAccountId: `user_${partnerRole}_${codeLower}`,
     createdAt: new Date().toISOString(),
   };
@@ -803,4 +804,51 @@ export const deleteGrnRecord = (id: string): void => {
   safeSetItem('grn_records', JSON.stringify(updated));
   fetch(`/api/grn/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
 };
+
+// --- THAWING BATCH STORAGE (PERUNTUKAN BATCH SYSTEM) ---
+export const getBatches = (date?: string): ThawingBatch[] => {
+  try {
+    const data = localStorage.getItem('thawing_batches');
+    if (data) {
+      let parsed: ThawingBatch[] = JSON.parse(data);
+      if (Array.isArray(parsed)) {
+        if (date) parsed = parsed.filter((b) => (b.date || '').split('T')[0] === date.split('T')[0]);
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load batches:', e);
+  }
+  return [];
+};
+
+export const saveBatchesLocally = (batches: ThawingBatch[]): void => {
+  safeSetItem('thawing_batches', JSON.stringify(batches));
+};
+
+export const saveBatches = (batches: ThawingBatch[] | ThawingBatch): void => {
+  const current = getBatches();
+  const incoming = Array.isArray(batches) ? batches : [batches];
+  const updated = [...current];
+
+  incoming.forEach((b) => {
+    const idx = updated.findIndex((existing) => existing.id === b.id);
+    if (idx >= 0) {
+      updated[idx] = { ...updated[idx], ...b };
+    } else {
+      updated.unshift(b);
+    }
+  });
+
+  saveBatchesLocally(updated);
+  postApiBackground('/api/batches', incoming);
+};
+
+export const deleteBatch = (id: string): void => {
+  const current = getBatches();
+  const updated = current.filter((b) => b.id !== id);
+  saveBatchesLocally(updated);
+  fetch(`/api/batches/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+};
+
 

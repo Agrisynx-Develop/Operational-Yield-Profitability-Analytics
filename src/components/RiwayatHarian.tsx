@@ -1,984 +1,672 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   ThawingItem,
   FabricationSegment,
   DailyClosingReport,
   ReportPhotoAttachment,
-  Store,
   ClosingPlanRecord,
   StockAdjustment,
   CogsMaster,
 } from '../types';
-import { exportStoreDailyLaporanExcel } from '../utils/excelExport';
-import { matchStoreEntity, isMatchPlan } from '../utils/storeHelper';
+import { exportStoreDailyLaporanExcel, exportStoreDailyLaporanCSV } from '../utils/excelExport';
 import {
+  FileSpreadsheet,
+  Download,
+  Clock,
+  Scale,
+  CheckCircle2,
+  AlertTriangle,
+  Eye,
   Camera,
-  Trash2,
-  Image as ImageIcon,
+  Layers,
+  Award,
+  Calendar,
+  Sparkles,
+  ChevronRight,
+  TrendingUp,
   Tag,
   Maximize2,
   X,
-  Calendar,
-  Download,
-  Clock,
-  Building2,
-  FileSpreadsheet,
-  Weight,
-  Scale,
-  CheckCircle2,
-  AlertCircle,
-  Eye,
-  Check,
-  ArrowRight,
+  Trash2,
 } from 'lucide-react';
 
 interface RiwayatHarianProps {
   items: ThawingItem[];
   segments: FabricationSegment[];
-  reports: DailyClosingReport[];
+  reports?: DailyClosingReport[];
   closingRecords?: ClosingPlanRecord[];
   adjustments?: StockAdjustment[];
   cogsList?: CogsMaster[];
-  currentStore?: Store;
   onCloseDay?: (closedReport: DailyClosingReport) => void;
   onDeleteReport?: (id: string) => void;
   onNavigateToClosing?: () => void;
 }
 
+const KNOWN_BRANDS = ['Swift', 'Teys', 'Kilcoy', 'Santori', 'Lokal'];
+const CUT_CATEGORIES = ['Prime Cuts', 'Secondary Cuts', 'Tertiary Cuts', 'Trimming'] as const;
+
 export default function RiwayatHarian({
-  items,
-  segments,
+  items = [],
+  segments = [],
   reports = [],
   closingRecords = [],
   adjustments = [],
   cogsList = [],
-  currentStore,
-  onCloseDay,
-  onDeleteReport,
   onNavigateToClosing,
 }: RiwayatHarianProps) {
-  // Store name display
-  const cleanStoreName = currentStore?.name
-    ? String(currentStore.name).replace(/^TDN\s*/i, '').trim()
-    : 'CKR';
-  const todanusDisplay = `TODANUS ${cleanStoreName.toUpperCase()}`;
+  // Tab view selection
+  const [activeTab, setActiveTab] = useState<'SEGMENTASI' | 'MERK' | 'BATCH' | 'DOKUMENTASI'>('SEGMENTASI');
 
-  // State: selected report or viewing today's draft
-  const [viewingTodayDraft, setViewingTodayDraft] = useState<boolean>(true);
-  const [selectedReport, setSelectedReport] = useState<DailyClosingReport | null>(null);
-
-  // Today string YYYY-MM-DD
+  // Selected date filter
   const todayStr = new Date().toISOString().split('T')[0];
-
-  // Storage key for IDs of deleted/hidden photos
-  const deletedStorageKey = `tdn_photos_deleted_${currentStore?.id || 'default'}`;
-
-  const [deletedPhotoIds, setDeletedPhotoIds] = useState<string[]>(() => {
-    try {
-      const saved = localStorage.getItem(deletedStorageKey);
-      return saved ? JSON.parse(saved) : [];
-    } catch {
-      return [];
-    }
-  });
-
-  // Persist deleted IDs
-  useEffect(() => {
-    try {
-      localStorage.setItem(deletedStorageKey, JSON.stringify(deletedPhotoIds));
-    } catch (e) {
-      console.warn('Gagal menyimpan deletedPhotoIds:', e);
-    }
-  }, [deletedPhotoIds, deletedStorageKey]);
+  const [selectedDate, setSelectedDate] = useState<string>(todayStr);
 
   // Lightbox modal state
   const [previewPhoto, setPreviewPhoto] = useState<ReportPhotoAttachment | null>(null);
 
-  // Active viewing date
-  const activeDate = viewingTodayDraft
-    ? todayStr
-    : selectedReport?.date || todayStr;
+  // Filtered operational datasets by date
+  const dateItems = useMemo(() => {
+    return items.filter((i) => (i.thawingDate || i.createdAt || '').startsWith(selectedDate));
+  }, [items, selectedDate]);
 
-  // Formatted date label for current selection
-  const formattedActiveDate = useMemo(() => {
-    try {
-      const d = new Date(activeDate);
-      return d.toLocaleDateString('id-ID', {
-        weekday: 'long',
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-      });
-    } catch {
-      return activeDate;
-    }
-  }, [activeDate]);
+  const dateSegments = useMemo(() => {
+    return segments.filter((s) => (s.createdAt || '').startsWith(selectedDate));
+  }, [segments, selectedDate]);
 
-  // Helper: Get clean process loss strictly adhering to Tally - Netto
-  const getCleanProcessLoss = (rep: DailyClosingReport) => {
-    const raw = typeof rep.totalWeightBeforeThawing === 'number' ? rep.totalWeightBeforeThawing : 0;
-    const thawed = typeof rep.totalWeightAfterThawing === 'number' ? rep.totalWeightAfterThawing : 0;
-    const fab = typeof rep.totalWeightAfterFabrication === 'number' ? rep.totalWeightAfterFabrication : 0;
+  const dateClosingRecords = useMemo(() => {
+    return closingRecords.filter((c) => (c.date || c.timestamp || '').startsWith(selectedDate));
+  }, [closingRecords, selectedDate]);
 
-    if (raw > 0 && thawed > 0) {
-      const thawLoss = Math.max(0, raw - thawed);
-      const fabLoss = fab > 0 && thawed > fab ? Math.max(0, thawed - fab) : 0;
-      return thawLoss + fabLoss;
-    }
+  // Overall KPIs for the day
+  const totalRawKg = dateItems.reduce((acc, i) => acc + (Number(i.weightBeforeThawing) || 0), 0);
+  const totalThawedKg = dateItems.reduce((acc, i) => acc + (Number(i.weightAfterThawing) || Number(i.weightBeforeThawing) || 0), 0);
+  const totalShrinkageKg = Math.max(0, totalRawKg - totalThawedKg);
+  const overallShrinkagePct = totalRawKg > 0 ? (totalShrinkageKg / totalRawKg) * 100 : 0;
+  const overallYieldPct = Math.max(0, 100 - overallShrinkagePct);
 
-    // Heal previous tally-leak bug (where totalProcessLoss equaled totalRaw)
-    if (raw > 0 && typeof rep.totalProcessLoss === 'number' && Math.abs(rep.totalProcessLoss - raw) < 0.05) {
-      return typeof rep.totalThawingLoss === 'number' && rep.totalThawingLoss < raw
-        ? rep.totalThawingLoss
-        : 0;
-    }
+  // 1. ANALYSIS BY CUT SEGMENTATION (Prime Cuts, Secondary Cuts, Tertiary Cuts, Trimming)
+  const cutAnalysis = useMemo(() => {
+    const totalCutWeight = dateSegments.reduce((a, s) => a + (Number(s.actualWeight) || 0), 0);
 
-    return rep.totalProcessLoss || 0;
-  };
+    return CUT_CATEGORIES.map((cutName) => {
+      const matchSegments = dateSegments.filter(
+        (s) => (s.cutCategory || '').toLowerCase().includes(cutName.toLowerCase().split(' ')[0])
+      );
+      const weight = matchSegments.reduce((a, s) => a + (Number(s.actualWeight) || 0), 0);
+      const sales = matchSegments.reduce((a, s) => a + (Number(s.salesKg) || 0), 0);
+      const sharePct = totalCutWeight > 0 ? (weight / totalCutWeight) * 100 : 0;
+      const remainingStock = Math.max(0, weight - sales);
 
-  // 1. Photos from Thawing Items (Timbangan Awal Thawing)
-  const dashboardItemPhotos: ReportPhotoAttachment[] = useMemo(() => {
-    return items
-      .filter((item) => {
-        if (!item.image || item.image === 'placeholder' || !item.image.trim()) return false;
-        if (viewingTodayDraft) return true;
-        const itemDate = (item.createdAt || item.thawingStartTime || '').split('T')[0];
-        return itemDate === activeDate;
-      })
-      .map((item) => {
-        const weightStr = (item.weightBeforeThawing || 0).toFixed(2);
-        const weightAfterStr =
-          typeof item.weightAfterThawing === 'number' && item.weightAfterThawing > 0
-            ? ` | Thawing: ${item.weightAfterThawing.toFixed(2)} Kg`
-            : '';
-        const rencanaStr = item.plannedFabrication ? ` [${item.plannedFabrication}]` : '';
-
-        return {
-          id: `photo_item_${item.id}`,
-          url: item.image,
-          caption: `Timbangan Raw/Thawing: ${item.name} (${weightStr} Kg)${weightAfterStr}${rencanaStr}`,
-          category: 'Timbangan' as const,
-          uploadedAt: item.createdAt || new Date().toISOString(),
-        };
-      });
-  }, [items, viewingTodayDraft, activeDate]);
-
-  // 2. Photos from Closing Fisik per Rencana Potong
-  const closingPhotos: ReportPhotoAttachment[] = useMemo(() => {
-    // Collect from current closingRecords
-    const currentList = (closingRecords || []).filter((rec) => {
-      if (!rec.photoUrl || rec.photoUrl === 'placeholder' || !rec.photoUrl.trim()) return false;
-      if (viewingTodayDraft) return true;
-      const recDate = (rec.date || rec.timestamp || '').split('T')[0];
-      return recDate === activeDate;
-    });
-
-    // Also collect from selectedReport.closingPlanRecords if viewing past report
-    const pastClosingList =
-      !viewingTodayDraft && selectedReport?.closingPlanRecords
-        ? selectedReport.closingPlanRecords.filter(
-            (rec) => rec.photoUrl && rec.photoUrl !== 'placeholder' && rec.photoUrl.trim()
-          )
-        : [];
-
-    // Deduplicate closing records by ID or URL
-    const seenRecKeys = new Set<string>();
-    const combinedClosing: typeof currentList = [];
-    [...currentList, ...pastClosingList].forEach((rec) => {
-      const recKey = `${rec.id || ''}_${rec.photoUrl?.trim() || ''}`;
-      if (!seenRecKeys.has(recKey)) {
-        seenRecKeys.add(recKey);
-        combinedClosing.push(rec);
-      }
-    });
-
-    return combinedClosing.map((rec) => {
-      const weightVal =
-        typeof rec.actualClosingStockKg === 'number' && !isNaN(rec.actualClosingStockKg)
-          ? rec.actualClosingStockKg
-          : 0;
       return {
-        id: `photo_closing_${rec.id || Math.random()}`,
-        url: rec.photoUrl!,
-        caption:
-          rec.photoCaption ||
-          `Timbangan Fisik Sisa Closing: ${rec.planName} (${weightVal.toFixed(2)} Kg)`,
-        category: 'Closing Stock' as const,
-        uploadedAt: rec.timestamp || rec.date || new Date().toISOString(),
+        cutCategory: cutName,
+        totalWeightKg: weight,
+        salesKg: sales,
+        remainingStockKg: remainingStock,
+        sharePercent: sharePct,
+        segmentCount: matchSegments.length,
+        items: matchSegments,
       };
     });
-  }, [closingRecords, viewingTodayDraft, activeDate, selectedReport]);
+  }, [dateSegments]);
 
-  // 3. Photos from historical daily closing reports
-  const reportSpecificPhotos: ReportPhotoAttachment[] = useMemo(() => {
-    if (viewingTodayDraft) return [];
-    if (!selectedReport || !selectedReport.photos) return [];
-    return selectedReport.photos.filter(
-      (p) => p && p.url && p.url !== 'placeholder' && !deletedPhotoIds.includes(p.id)
-    );
-  }, [viewingTodayDraft, selectedReport, deletedPhotoIds]);
+  // 2. ANALYSIS BY BRAND (Swift, Teys, Kilcoy, Santori, Lokal) FOR RAW INGREDIENT QUALITY
+  const brandAnalysis = useMemo(() => {
+    const map = new Map<string, { raw: number; thawed: number; loss: number; count: number; items: ThawingItem[] }>();
 
-  // 4. Photos from selectedReport.itemsProcessed & closingPhotoUrl directly
-  const reportDirectPhotos: ReportPhotoAttachment[] = useMemo(() => {
-    if (viewingTodayDraft || !selectedReport) return [];
-    const directList: ReportPhotoAttachment[] = [];
+    // Initialize with known brands so they appear nicely
+    KNOWN_BRANDS.forEach((b) => {
+      map.set(b, { raw: 0, thawed: 0, loss: 0, count: 0, items: [] });
+    });
 
-    if (selectedReport.closingPhotoUrl && selectedReport.closingPhotoUrl.trim() && selectedReport.closingPhotoUrl !== 'placeholder') {
-      directList.push({
-        id: `photo_closing_direct_${selectedReport.id}`,
-        url: selectedReport.closingPhotoUrl.trim(),
-        caption: `Bukti Closing Fisik (${selectedReport.date})`,
-        category: 'Closing Stock' as const,
-        uploadedAt: selectedReport.closedAt || selectedReport.date || new Date().toISOString(),
-      });
-    }
+    dateItems.forEach((it) => {
+      const b = it.brand || 'Lokal';
+      const cur = map.get(b) || { raw: 0, thawed: 0, loss: 0, count: 0, items: [] };
+      const raw = Number(it.weightBeforeThawing) || 0;
+      const thawed = Number(it.weightAfterThawing) || raw;
+      const loss = Math.max(0, raw - thawed);
 
-    (selectedReport.itemsProcessed || []).forEach((item: any, idx: number) => {
-      const imgUrl = (item.image || item.photoUrl || '').trim();
-      if (imgUrl && imgUrl !== 'placeholder') {
-        directList.push({
-          id: `photo_item_proc_${item.id || idx}`,
-          url: imgUrl,
-          caption: `Timbangan Raw/Thawing: ${item.name || 'Bahan'} (${(item.weightBefore || 0).toFixed(2)} Kg) | Thawing: ${(item.weightAfter || 0).toFixed(2)} Kg [${item.plannedFabrication || ''}]`,
-          category: 'Timbangan' as const,
-          uploadedAt: selectedReport.closedAt || selectedReport.date || new Date().toISOString(),
+      cur.raw += raw;
+      cur.thawed += thawed;
+      cur.loss += loss;
+      cur.count += 1;
+      cur.items.push(it);
+      map.set(b, cur);
+    });
+
+    return Array.from(map.entries())
+      .filter(([_, val]) => val.count > 0 || val.raw > 0)
+      .map(([brand, val]) => {
+        const lossPct = val.raw > 0 ? (val.loss / val.raw) * 100 : 0;
+        const yieldPct = Math.max(0, 100 - lossPct);
+
+        let grade: 'Grade A (Optimal Yield)' | 'Grade B (Standar)' | 'Grade C (Susut Tinggi)' = 'Grade A (Optimal Yield)';
+        let gradeBadge = 'bg-emerald-100 text-emerald-800 border-emerald-300';
+        let recommendation = 'Kualitas prima, retensi air minimal.';
+
+        if (lossPct > 3.5) {
+          grade = 'Grade C (Susut Tinggi)';
+          gradeBadge = 'bg-rose-100 text-rose-800 border-rose-300';
+          recommendation = 'Waspada susut tinggi, evaluasi suhu chiller atau supplier.';
+        } else if (lossPct > 2.0) {
+          grade = 'Grade B (Standar)';
+          gradeBadge = 'bg-amber-100 text-amber-800 border-amber-300';
+          recommendation = 'Kualitas normal standar industri.';
+        }
+
+        return {
+          brand,
+          count: val.count,
+          rawKg: val.raw,
+          thawedKg: val.thawed,
+          lossKg: val.loss,
+          lossPercent: lossPct,
+          yieldPercent: yieldPct,
+          grade,
+          gradeBadge,
+          recommendation,
+          items: val.items,
+        };
+      })
+      .sort((a, b) => a.lossPercent - b.lossPercent);
+  }, [dateItems]);
+
+  // 3. ANALYSIS BY BATCH (Batch 1: Untuk Penjualan Malam, etc.)
+  const batchAnalysis = useMemo(() => {
+    const map = new Map<string, { batchId: string; purpose: string; items: ThawingItem[]; startTime?: string; endTime?: string }>();
+
+    dateItems.forEach((it) => {
+      const bId = it.batchId || `Batch ${it.batchNumber || 1}`;
+      const purpose = it.batchPurpose || it.openingPurpose || 'Untuk Display Siang';
+      const cur = map.get(bId) || { batchId: bId, purpose, items: [] };
+      cur.items.push(it);
+      if (!cur.startTime && it.thawingStartTime) cur.startTime = it.thawingStartTime;
+      if (it.thawingEndTime) cur.endTime = it.thawingEndTime;
+      map.set(bId, cur);
+    });
+
+    return Array.from(map.values()).map((b) => {
+      const raw = b.items.reduce((acc, i) => acc + (Number(i.weightBeforeThawing) || 0), 0);
+      const thawed = b.items.reduce((acc, i) => acc + (Number(i.weightAfterThawing) || Number(i.weightBeforeThawing) || 0), 0);
+      const loss = Math.max(0, raw - thawed);
+      const lossPct = raw > 0 ? (loss / raw) * 100 : 0;
+      const allDone = b.items.length > 0 && b.items.every((i) => i.status === 'pabrikasi_done');
+      const anyThawed = b.items.some((i) => i.weightAfterThawing !== null && i.weightAfterThawing !== undefined);
+
+      let status = 'THAWING_ACTIVE';
+      let statusBadge = 'bg-blue-100 text-blue-800 border-blue-200';
+      let statusLabel = 'Thawing Aktif';
+
+      if (allDone) {
+        status = 'COMPLETED_CUT';
+        statusBadge = 'bg-emerald-100 text-emerald-800 border-emerald-200';
+        statusLabel = 'Selesai Dipabrikasi';
+      } else if (anyThawed) {
+        status = 'PABRIKASI_READY';
+        statusBadge = 'bg-amber-100 text-amber-800 border-amber-200';
+        statusLabel = 'Siap Masuk Segmentasi';
+      }
+
+      return {
+        batchId: b.batchId,
+        purpose: b.purpose,
+        itemCount: b.items.length,
+        rawKg: raw,
+        thawedKg: thawed,
+        lossKg: loss,
+        lossPercent: lossPct,
+        status,
+        statusBadge,
+        statusLabel,
+        startTime: b.startTime,
+        endTime: b.endTime,
+        items: b.items,
+      };
+    });
+  }, [dateItems]);
+
+  // Photos collection
+  const allPhotos = useMemo(() => {
+    const list: ReportPhotoAttachment[] = [];
+    dateItems.forEach((it, idx) => {
+      if (it.image && it.image.trim() && it.image !== 'placeholder') {
+        list.push({
+          id: `photo_item_${it.id || idx}`,
+          url: it.image,
+          caption: `${it.name} (${it.brand || 'Lokal'}) - ${it.weightBeforeThawing} Kg`,
+          category: 'Timbangan',
+          uploadedAt: it.thawingStartTime || it.createdAt || '',
         });
       }
     });
-
-    return directList;
-  }, [viewingTodayDraft, selectedReport]);
-
-  // 5. Combine all inputted photos for current active selection (STRICT DEDUPLICATION BY IMAGE URL)
-  const currentPhotos: ReportPhotoAttachment[] = useMemo(() => {
-    const seenUrls = new Set<string>();
-    const uniquePhotos: ReportPhotoAttachment[] = [];
-
-    // Order: live items & closing records first, then direct report photos, then report attachments
-    [...dashboardItemPhotos, ...closingPhotos, ...reportDirectPhotos, ...reportSpecificPhotos].forEach((p) => {
-      if (!p || !p.url || p.url === 'placeholder' || !p.url.trim()) return;
-      if (deletedPhotoIds.includes(p.id)) return;
-
-      const cleanUrl = p.url.trim();
-      if (!seenUrls.has(cleanUrl)) {
-        seenUrls.add(cleanUrl);
-        uniquePhotos.push(p);
+    dateClosingRecords.forEach((c, idx) => {
+      if (c.photoUrl && c.photoUrl.trim() && c.photoUrl !== 'placeholder') {
+        list.push({
+          id: `photo_closing_${c.id || idx}`,
+          url: c.photoUrl,
+          caption: `Closing: ${c.planName} - Fisik: ${c.actualClosingStockKg} Kg`,
+          category: 'Closing Stock',
+          uploadedAt: c.timestamp || '',
+        });
       }
     });
+    return list;
+  }, [dateItems, dateClosingRecords]);
 
-    return uniquePhotos.sort((a, b) => {
-      const timeA = new Date(a.uploadedAt || 0).getTime();
-      const timeB = new Date(b.uploadedAt || 0).getTime();
-      return timeB - timeA; // newest first
-    });
-  }, [reportSpecificPhotos, reportDirectPhotos, dashboardItemPhotos, closingPhotos, deletedPhotoIds]);
-
-  // Helper: Count all photos accurately for a report
-  const getReportPhotoCount = (rep: DailyClosingReport) => {
-    const seen = new Set<string>();
-    (rep.photos || []).forEach((p) => {
-      if (p && p.url && p.url.trim() && p.url !== 'placeholder') seen.add(p.url.trim());
-    });
-    if (rep.closingPhotoUrl && rep.closingPhotoUrl.trim() && rep.closingPhotoUrl !== 'placeholder') {
-      seen.add(rep.closingPhotoUrl.trim());
-    }
-    (rep.closingPlanRecords || []).forEach((c) => {
-      if (c && c.photoUrl && c.photoUrl.trim() && c.photoUrl !== 'placeholder') seen.add(c.photoUrl.trim());
-    });
-    (rep.itemsProcessed || []).forEach((i: any) => {
-      const url = (i.image || i.photoUrl || '').trim();
-      if (url && url !== 'placeholder') seen.add(url);
-    });
-    items
-      .filter((i) => (i.createdAt || i.thawingStartTime || '').startsWith(rep.date) && i.image && i.image.trim() && i.image !== 'placeholder')
-      .forEach((i) => seen.add(i.image.trim()));
-    closingRecords
-      .filter((c) => (c.date || c.timestamp || '').startsWith(rep.date) && c.photoUrl && c.photoUrl.trim() && c.photoUrl !== 'placeholder')
-      .forEach((c) => seen.add(c.photoUrl!.trim()));
-
-    return Math.max(seen.size, (rep.photos || []).length);
+  // Export handlers
+  const handleExportExcel = () => {
+    exportStoreDailyLaporanExcel(
+      { id: '1', code: 'MAIN', name: 'Central Facility', city: 'Hub', createdAt: '' },
+      selectedDate,
+      items,
+      segments,
+      adjustments,
+      closingRecords,
+      cogsList
+    );
   };
 
-  // Delete photo
-  const handleDeletePhoto = (photoId: string) => {
-    if (window.confirm('Hapus tampilan foto dokumentasi ini?')) {
-      setDeletedPhotoIds((prev) => [...prev, photoId]);
-      if (previewPhoto?.id === photoId) {
-        setPreviewPhoto(null);
-      }
-    }
+  const handleExportCsv = () => {
+    exportStoreDailyLaporanCSV(
+      { id: '1', code: 'MAIN', name: 'Central Facility', city: 'Hub', createdAt: '' },
+      selectedDate,
+      items,
+      segments,
+      closingRecords
+    );
   };
-
-  // Download photo file
-  const handleDownloadPhoto = (photo: ReportPhotoAttachment) => {
-    try {
-      const link = document.createElement('a');
-      link.href = photo.url;
-      const cleanCap = (photo.caption || 'dokumentasi')
-        .replace(/[^a-zA-Z0-9]/g, '_')
-        .substring(0, 30);
-      link.download = `foto_${photo.category || 'doc'}_${cleanCap}_${Date.now()}.jpg`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    } catch (e) {
-      console.error('Gagal mengunduh foto:', e);
-    }
-  };
-
-  // Export excel for active report/date
-  const handleExportExcelForActiveDate = () => {
-    if (!currentStore) return;
-    try {
-      exportStoreDailyLaporanExcel(
-        currentStore,
-        activeDate,
-        items,
-        segments,
-        adjustments,
-        closingRecords,
-        cogsList
-      );
-    } catch (e) {
-      console.error('Gagal mengunduh Excel:', e);
-      alert('Gagal mengekspor laporan Excel.');
-    }
-  };
-
-  // Active closing records for active date & store
-  const activeClosingRecords = useMemo(() => {
-    return closingRecords.filter((rec) => {
-      if (!matchStoreEntity(rec.storeId, currentStore)) return false;
-      const recDate = (rec.date || rec.timestamp || '').split('T')[0];
-      return recDate === activeDate || (!rec.date && viewingTodayDraft);
-    });
-  }, [closingRecords, currentStore, activeDate, viewingTodayDraft]);
-
-  // Sorted reports descending
-  const sortedReports = useMemo(() => {
-    return [...reports].sort((a, b) => {
-      const timeA = new Date(a.date || 0).getTime();
-      const timeB = new Date(b.date || 0).getTime();
-      return timeB - timeA;
-    });
-  }, [reports]);
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-16">
-      {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
-        <div className="flex items-center gap-3">
-          <div className="p-3 bg-emerald-100 text-emerald-800 rounded-2xl">
-            <FileSpreadsheet className="w-6 h-6" />
-          </div>
+      {/* 1. Header Banner */}
+      <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-emerald-950 p-6 rounded-3xl text-white shadow-xl border border-slate-800">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-              Riwayat Harian & List Laporan Excel
+            <div className="flex items-center gap-2 mb-2">
+              <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5">
+                <Sparkles className="w-3 h-3 text-emerald-400" />
+                Operational Yield & Quality History
+              </span>
+            </div>
+            <h1 className="text-2xl md:text-3xl font-black tracking-tight text-white">
+              Riwayat Operasional & Kualitas Bahan
             </h1>
-            <p className="text-slate-500 text-xs md:text-sm mt-0.5">
-              Arsip laporan harian Excel {todanusDisplay} dan dokumentasi foto hasil input operasional.
+            <p className="text-slate-300 text-xs md:text-sm mt-1 max-w-2xl">
+              Evaluasi yield per segmentasi potong (Prime, Secondary, Tertiary, Trimming), benchmarking kualitas bahan baku per merk, serta log thawing akurat per batch.
             </p>
           </div>
+
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex items-center gap-1.5 bg-slate-950/80 border border-slate-700 px-3 py-2 rounded-2xl">
+              <Calendar className="w-4 h-4 text-emerald-400" />
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="bg-transparent text-xs font-bold text-white focus:outline-none cursor-pointer"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-black flex items-center gap-2 shadow-md transition active:scale-95 cursor-pointer"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>Download Excel</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-2xl text-xs font-bold flex items-center gap-1.5 border border-slate-700 transition cursor-pointer"
+              title="Download CSV"
+            >
+              <Download className="w-4 h-4" />
+              <span>CSV</span>
+            </button>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-center">
-          <span className="text-xs font-black px-3.5 py-1.5 rounded-xl bg-slate-100 text-slate-700 border border-slate-200 flex items-center gap-1.5">
-            <Building2 className="w-3.5 h-3.5 text-slate-500" />
-            {todanusDisplay}
-          </span>
-          <span className="text-xs font-bold px-3 py-1.5 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-200">
-            {reports.length} Laporan Closing
-          </span>
+        {/* Quick KPI Bar */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6 pt-6 border-t border-slate-800/80">
+          <div className="bg-slate-950/40 p-3 rounded-2xl border border-slate-800">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Total Bahan Diolah</span>
+            <span className="text-lg font-black text-white font-mono mt-0.5 block">{totalRawKg.toFixed(2)} Kg</span>
+          </div>
+          <div className="bg-slate-950/40 p-3 rounded-2xl border border-slate-800">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Hasil Thawing Bersih</span>
+            <span className="text-lg font-black text-emerald-400 font-mono mt-0.5 block">{totalThawedKg.toFixed(2)} Kg</span>
+          </div>
+          <div className="bg-slate-950/40 p-3 rounded-2xl border border-slate-800">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Susut Thawing (Loss)</span>
+            <span className="text-lg font-black text-rose-400 font-mono mt-0.5 block">{totalShrinkageKg.toFixed(2)} Kg ({overallShrinkagePct.toFixed(2)}%)</span>
+          </div>
+          <div className="bg-slate-950/40 p-3 rounded-2xl border border-slate-800">
+            <span className="text-[10px] uppercase font-bold text-slate-400 block tracking-wider">Rendemen / Yield Rate</span>
+            <span className="text-lg font-black text-sky-400 font-mono mt-0.5 block">{overallYieldPct.toFixed(2)}%</span>
+          </div>
         </div>
       </div>
 
-      {/* Main 2-Column Responsive Layout: Left = List Laporan Excel, Right = Riwayat Foto */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* LEFT COLUMN: List Laporan Excel & Draft Hari Ini */}
-        <div className="lg:col-span-4 xl:col-span-4 space-y-4">
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
-            {/* Left Header */}
-            <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
-                <h3 className="font-extrabold text-xs uppercase tracking-wider text-white">
-                  List Laporan Excel Harian
-                </h3>
+      {/* 2. Navigation Tabs */}
+      <div className="flex items-center gap-2 border-b border-slate-200 pb-3 overflow-x-auto scrollbar-none">
+        <button
+          type="button"
+          onClick={() => setActiveTab('SEGMENTASI')}
+          className={`px-4 py-2.5 rounded-2xl text-xs font-black transition cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+            activeTab === 'SEGMENTASI'
+              ? 'bg-emerald-800 text-white shadow-md'
+              : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <Layers className="w-4 h-4" />
+          <span>Berdasarkan Segmentasi Potong</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('MERK')}
+          className={`px-4 py-2.5 rounded-2xl text-xs font-black transition cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+            activeTab === 'MERK'
+              ? 'bg-emerald-800 text-white shadow-md'
+              : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <Award className="w-4 h-4" />
+          <span>Berdasarkan Merk Bahan (Evaluasi Mutu)</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('BATCH')}
+          className={`px-4 py-2.5 rounded-2xl text-xs font-black transition cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+            activeTab === 'BATCH'
+              ? 'bg-emerald-800 text-white shadow-md'
+              : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <Clock className="w-4 h-4" />
+          <span>Berdasarkan Batch Thawing</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('DOKUMENTASI')}
+          className={`px-4 py-2.5 rounded-2xl text-xs font-black transition cursor-pointer flex items-center gap-2 whitespace-nowrap ${
+            activeTab === 'DOKUMENTASI'
+              ? 'bg-emerald-800 text-white shadow-md'
+              : 'bg-white text-slate-700 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <Camera className="w-4 h-4" />
+          <span>Bukti Foto Timbangan ({allPhotos.length})</span>
+        </button>
+      </div>
+
+      {/* 3. TAB 1: BERDASARKAN SEGMENTASI POTONG */}
+      {activeTab === 'SEGMENTASI' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {cutAnalysis.map((cut) => (
+              <div
+                key={cut.cutCategory}
+                className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm hover:shadow-md transition"
+              >
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <span className="text-xs font-black text-slate-900">{cut.cutCategory}</span>
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                    {cut.segmentCount} Segmen
+                  </span>
+                </div>
+                <div className="text-2xl font-black text-slate-900 font-mono">
+                  {cut.totalWeightKg.toFixed(2)} <span className="text-xs text-slate-500 font-sans">Kg</span>
+                </div>
+                <div className="mt-3 pt-3 border-t border-slate-100 space-y-1 text-[11px] text-slate-600">
+                  <div className="flex justify-between">
+                    <span>Porsi Pabrikasi:</span>
+                    <strong className="text-emerald-700 font-mono">{cut.sharePercent.toFixed(1)}%</strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Penjualan (Sales):</span>
+                    <strong className="text-slate-800 font-mono">{cut.salesKg.toFixed(2)} Kg</strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Sisa Stok Fisik:</span>
+                    <strong className="text-slate-900 font-mono">{cut.remainingStockKg.toFixed(2)} Kg</strong>
+                  </div>
+                </div>
               </div>
-              <span className="text-[10px] font-bold bg-white/10 text-slate-300 px-2 py-0.5 rounded-md">
-                {reports.length + 1} Periode
-              </span>
+            ))}
+          </div>
+
+          {/* Detailed Cut Table */}
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="text-sm font-black text-slate-900">Rincian Realisasi Potongan Segmen ({selectedDate})</h3>
+              <span className="text-xs text-slate-500 font-medium">Standar: Prime Cuts, Secondary Cuts, Tertiary Cuts, Trimming</span>
             </div>
 
-            <div className="p-3 space-y-2.5 max-h-[calc(100vh-260px)] overflow-y-auto">
-              {/* Draft Operasional Hari Ini Card */}
+            {dateSegments.length === 0 ? (
+              <div className="p-12 text-center text-slate-400">
+                <Scale className="w-10 h-10 mx-auto mb-2 text-slate-300" />
+                <p className="font-bold text-slate-600">Belum ada data segmen potong untuk tanggal ini.</p>
+                <p className="text-xs mt-1">Lakukan segmentasi potong di menu Segmentasi Pabrikasi.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-100 text-slate-700 uppercase font-black tracking-wider text-[10px]">
+                    <tr>
+                      <th className="py-3 px-4">No</th>
+                      <th className="py-3 px-4">Kategori Potongan</th>
+                      <th className="py-3 px-4">Nama Potongan</th>
+                      <th className="py-3 px-4">Merk Bahan</th>
+                      <th className="py-3 px-4 text-right">Target (Kg)</th>
+                      <th className="py-3 px-4 text-right">Realisasi (Kg)</th>
+                      <th className="py-3 px-4 text-right">Susut (Kg)</th>
+                      <th className="py-3 px-4 text-right">Sales (Kg)</th>
+                      <th className="py-3 px-4 text-center">Waktu Input</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-slate-800">
+                    {dateSegments.map((seg, idx) => (
+                      <tr key={seg.id || idx} className="hover:bg-slate-50/80 transition">
+                        <td className="py-3 px-4 font-mono text-slate-400">{idx + 1}</td>
+                        <td className="py-3 px-4">
+                          <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-slate-100 text-slate-700">
+                            {seg.cutCategory || 'Secondary Cuts'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 font-bold text-slate-900">{seg.segmentName}</td>
+                        <td className="py-3 px-4">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-50 text-red-700 border border-red-200">
+                            {seg.brand || 'Lokal'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono text-slate-600">{(seg.targetWeight || 0).toFixed(2)}</td>
+                        <td className="py-3 px-4 text-right font-mono font-bold text-emerald-700">{(seg.actualWeight || 0).toFixed(2)}</td>
+                        <td className="py-3 px-4 text-right font-mono text-rose-600">{(seg.periodicShrinkage || 0).toFixed(2)}</td>
+                        <td className="py-3 px-4 text-right font-mono text-slate-800">{(seg.salesKg || 0).toFixed(2)}</td>
+                        <td className="py-3 px-4 text-center text-slate-400 font-mono text-[11px]">
+                          {seg.createdAt ? new Date(seg.createdAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '-'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 4. TAB 2: BERDASARKAN MERK BAHAN (EVALUASI KUALITAS BAHAN BAKU) */}
+      {activeTab === 'MERK' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {brandAnalysis.map((b) => (
               <div
-                onClick={() => {
-                  setViewingTodayDraft(true);
-                  setSelectedReport(null);
-                }}
-                className={`p-3.5 rounded-2xl border transition-all cursor-pointer relative ${
-                  viewingTodayDraft
-                    ? 'bg-emerald-50/80 border-emerald-500 shadow-xs ring-2 ring-emerald-500/20'
-                    : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/50'
-                }`}
+                key={b.brand}
+                className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm hover:shadow-md transition space-y-4"
               >
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                    </span>
-                    <span className="text-xs font-extrabold text-slate-900">
-                      Draft Operasional Hari Ini
-                    </span>
-                  </div>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
-                    Aktif
-                  </span>
-                </div>
-
-                <p className="text-[11px] text-slate-500 mt-1 font-mono">
-                  {new Date().toLocaleDateString('id-ID', {
-                    weekday: 'short',
-                    day: 'numeric',
-                    month: 'short',
-                    year: 'numeric',
-                  })}
-                </p>
-
-                <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600">
-                  <span>{items.length} Item Bahan</span>
-                  <span className="font-bold text-purple-700 flex items-center gap-1">
-                    <Camera className="w-3 h-3" />
-                    {viewingTodayDraft ? currentPhotos.length : '-'} Foto
-                  </span>
-                </div>
-              </div>
-
-              {/* Separator / Title */}
-              <div className="pt-2 pb-1 px-1 flex items-center justify-between">
-                <span className="text-[11px] font-extrabold text-slate-400 uppercase tracking-wider">
-                  Arsip Laporan Closing
-                </span>
-                <span className="text-[10px] text-slate-400">Terbaru di atas</span>
-              </div>
-
-              {/* List of past closing reports */}
-              {sortedReports.length === 0 ? (
-                <div className="p-6 text-center text-slate-400 text-xs bg-slate-50 rounded-2xl border border-dashed border-slate-200">
-                  Belum ada arsip closing. Silakan segarkan closing harian untuk membekukan laporan.
-                </div>
-              ) : (
-                sortedReports.map((rep) => {
-                  const isSelected = !viewingTodayDraft && selectedReport?.id === rep.id;
-                  const repDateFormatted = (() => {
-                    try {
-                      return new Date(rep.date).toLocaleDateString('id-ID', {
-                        weekday: 'short',
-                        day: 'numeric',
-                        month: 'short',
-                        year: 'numeric',
-                      });
-                    } catch {
-                      return rep.date;
-                    }
-                  })();
-
-                  const repPhotosCount = getReportPhotoCount(rep);
-                  const cleanProcessLoss = getCleanProcessLoss(rep);
-
-                  return (
-                    <div
-                      key={rep.id}
-                      onClick={() => {
-                        setViewingTodayDraft(false);
-                        setSelectedReport(rep);
-                      }}
-                      className={`p-3.5 rounded-2xl border transition-all cursor-pointer relative group ${
-                        isSelected
-                          ? 'bg-purple-50/80 border-purple-500 shadow-xs ring-2 ring-purple-500/20'
-                          : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50/60'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-xs font-black text-slate-900">
-                          {repDateFormatted}
-                        </span>
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700">
-                          Closing Resmi
-                        </span>
-                      </div>
-
-                      {/* Metrics summary */}
-                      <div className="mt-2 grid grid-cols-2 gap-1.5 text-[11px] bg-slate-50/80 p-2 rounded-xl border border-slate-100">
-                        <div>
-                          <span className="text-slate-400 block text-[10px]">Susut Proses</span>
-                          <span className="font-bold text-slate-800">
-                            {cleanProcessLoss.toFixed(2)} Kg
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-slate-400 block text-[10px]">Susut Jual</span>
-                          <span className="font-bold text-slate-800">
-                            {(rep.totalSusutJual || 0).toFixed(2)} Kg
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Bottom row actions */}
-                      <div className="mt-2.5 pt-2 border-t border-slate-100 flex items-center justify-between">
-                        <div className="flex items-center gap-1.5 text-[11px] text-purple-700 font-bold">
-                          <Camera className="w-3 h-3" />
-                          <span>{repPhotosCount} Foto</span>
-                        </div>
-
-                        <div className="flex items-center gap-1">
-                          {/* Download Excel button for this report */}
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (currentStore) {
-                                exportStoreDailyLaporanExcel(
-                                  currentStore,
-                                  rep.date,
-                                  items,
-                                  segments,
-                                  adjustments,
-                                  closingRecords,
-                                  cogsList
-                                );
-                              }
-                            }}
-                            className="p-1.5 text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
-                            title="Unduh Laporan Excel (.xlsx)"
-                          >
-                            <FileSpreadsheet className="w-3.5 h-3.5" />
-                          </button>
-
-                          {/* Delete report button */}
-                          {onDeleteReport && (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (
-                                  window.confirm(
-                                    `Yakin ingin menghapus arsip closing tanggal ${repDateFormatted}?`
-                                  )
-                                ) {
-                                  onDeleteReport(rep.id);
-                                  if (selectedReport?.id === rep.id) {
-                                    setViewingTodayDraft(true);
-                                    setSelectedReport(null);
-                                  }
-                                }
-                              }}
-                              className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition"
-                              title="Hapus Laporan Ini"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">🏷️</span>
+                    <div>
+                      <h3 className="font-black text-slate-900 text-base">{b.brand}</h3>
+                      <span className="text-[10px] text-slate-500 font-medium">{b.count} batch / bahan diuji</span>
                     </div>
-                  );
-                })
-              )}
-            </div>
+                  </div>
+                  <span className={`text-[10px] font-black px-2.5 py-1 rounded-full border ${b.gradeBadge}`}>
+                    {b.grade}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-2xl border border-slate-100 text-xs">
+                  <div>
+                    <span className="text-[10px] text-slate-400 block uppercase">Bahan Baku Awal</span>
+                    <strong className="font-mono text-slate-800 text-sm">{b.rawKg.toFixed(2)} Kg</strong>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 block uppercase">Hasil Thawing</span>
+                    <strong className="font-mono text-emerald-700 text-sm">{b.thawedKg.toFixed(2)} Kg</strong>
+                  </div>
+                  <div className="mt-1 pt-1 border-t border-slate-200">
+                    <span className="text-[10px] text-slate-400 block uppercase">Susut Cair (Loss)</span>
+                    <strong className="font-mono text-rose-600 text-sm">{b.lossKg.toFixed(2)} Kg ({b.lossPercent.toFixed(2)}%)</strong>
+                  </div>
+                  <div className="mt-1 pt-1 border-t border-slate-200">
+                    <span className="text-[10px] text-slate-400 block uppercase">Rendemen Bersih</span>
+                    <strong className="font-mono text-sky-700 text-sm">{b.yieldPercent.toFixed(2)}%</strong>
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-slate-600 italic bg-amber-50/60 p-2.5 rounded-xl border border-amber-200/60">
+                  💡 {b.recommendation}
+                </p>
+              </div>
+            ))}
           </div>
         </div>
+      )}
 
-        {/* RIGHT COLUMN: Riwayat Foto & Keterangan (Hanya Menampilkan Foto Yang Diinput) */}
-        <div className="lg:col-span-8 xl:col-span-8 space-y-4">
-          {/* Top Bar with Riwayat Foto Pill & Unduh Excel Action */}
-          <div className="bg-slate-900 text-white p-4 rounded-3xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
-            <div className="flex items-center gap-2">
-              <div className="px-3.5 py-1.5 rounded-full bg-purple-600 text-white text-xs font-black flex items-center gap-1.5 shadow-xs">
-                <Camera className="w-4 h-4" />
-                <span>Riwayat Operasional & Foto ({currentPhotos.length})</span>
+      {/* 5. TAB 3: BERDASARKAN BATCH THAWING */}
+      {activeTab === 'BATCH' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {batchAnalysis.map((b) => (
+              <div
+                key={b.batchId}
+                className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm hover:shadow-md transition space-y-4"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-black text-slate-900 text-base">{b.batchId}</h3>
+                    <p className="text-xs text-emerald-800 font-bold">{b.purpose}</p>
+                  </div>
+                  <span className={`text-[10px] font-black px-2.5 py-1 rounded-full border ${b.statusBadge}`}>
+                    {b.statusLabel}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-2xl border border-slate-100 text-xs">
+                  <div>
+                    <span className="text-[10px] text-slate-400 block uppercase">Jumlah Bahan</span>
+                    <strong className="font-mono text-slate-800 text-sm">{b.itemCount} Item</strong>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-400 block uppercase">Total Berat Awal</span>
+                    <strong className="font-mono text-slate-800 text-sm">{b.rawKg.toFixed(2)} Kg</strong>
+                  </div>
+                  <div className="mt-1 pt-1 border-t border-slate-200">
+                    <span className="text-[10px] text-slate-400 block uppercase">Hasil Thaw</span>
+                    <strong className="font-mono text-emerald-700 text-sm">{b.thawedKg.toFixed(2)} Kg</strong>
+                  </div>
+                  <div className="mt-1 pt-1 border-t border-slate-200">
+                    <span className="text-[10px] text-slate-400 block uppercase">Susut (%)</span>
+                    <strong className="font-mono text-rose-600 text-sm">{b.lossPercent.toFixed(2)}%</strong>
+                  </div>
+                </div>
+
+                <div className="text-[11px] text-slate-500 flex items-center justify-between pt-1">
+                  <span>Mulai: <strong className="text-slate-800">{b.startTime ? new Date(b.startTime).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '-'}</strong></span>
+                  <span>Selesai: <strong className="text-slate-800">{b.endTime ? new Date(b.endTime).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : (b.status === 'COMPLETED_CUT' ? 'Selesai' : 'Aktif')}</strong></span>
+                </div>
               </div>
-              <span className="text-xs font-bold text-slate-300 hidden md:inline">
-                • {formattedActiveDate}
-              </span>
-            </div>
+            ))}
+          </div>
+        </div>
+      )}
 
-            <div className="flex items-center gap-2 self-start sm:self-center">
-              {onNavigateToClosing && (
-                <button
-                  type="button"
-                  onClick={onNavigateToClosing}
-                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-bold flex items-center gap-1.5 border border-slate-700 transition cursor-pointer"
+      {/* 6. TAB 4: BUKTI FOTO TIMBANGAN */}
+      {activeTab === 'DOKUMENTASI' && (
+        <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-black text-slate-900">Arsip Foto Timbangan & Dokumentasi ({selectedDate})</h3>
+            <span className="text-xs text-slate-500 font-medium">{allPhotos.length} Foto Tersimpan</span>
+          </div>
+
+          {allPhotos.length === 0 ? (
+            <div className="p-12 text-center text-slate-400">
+              <Camera className="w-10 h-10 mx-auto mb-2 text-slate-300" />
+              <p className="font-bold text-slate-600">Belum ada foto timbangan untuk tanggal ini.</p>
+              <p className="text-xs mt-1">Unggah foto saat melakukan penimbangan bahan thawing atau closing fisik.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+              {allPhotos.map((p) => (
+                <div
+                  key={p.id}
+                  onClick={() => setPreviewPhoto(p)}
+                  className="group relative bg-slate-100 rounded-2xl overflow-hidden aspect-square border border-slate-200 cursor-pointer hover:border-emerald-500 transition shadow-xs"
                 >
-                  <Scale className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Closing Rencana Potong</span>
-                </button>
-              )}
+                  <img src={p.url} alt={p.caption} className="w-full h-full object-cover group-hover:scale-105 transition" />
+                  <div className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition p-2.5 flex flex-col justify-end text-white">
+                    <p className="text-[10px] font-bold line-clamp-2">{p.caption}</p>
+                    <span className="text-[9px] text-slate-300 font-mono mt-0.5">
+                      {p.uploadedAt ? new Date(p.uploadedAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : ''}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Photo Lightbox Modal */}
+      {previewPhoto && (
+        <div className="fixed inset-0 z-50 bg-slate-950/90 flex items-center justify-center p-4">
+          <div className="relative max-w-2xl w-full bg-slate-900 rounded-3xl overflow-hidden border border-slate-800 text-white">
+            <button
+              type="button"
+              onClick={() => setPreviewPhoto(null)}
+              className="absolute top-4 right-4 z-10 p-2 bg-slate-800/80 hover:bg-slate-700 text-white rounded-full transition cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <div className="aspect-video bg-black flex items-center justify-center overflow-hidden">
+              <img src={previewPhoto.url} alt={previewPhoto.caption} className="max-h-[70vh] w-auto object-contain" />
+            </div>
+            <div className="p-4 bg-slate-900 border-t border-slate-800 flex items-center justify-between">
+              <div>
+                <p className="text-xs font-bold text-white">{previewPhoto.caption}</p>
+                <span className="text-[10px] text-slate-400 font-mono">
+                  {previewPhoto.uploadedAt ? new Date(previewPhoto.uploadedAt).toLocaleString('id-ID') : ''}
+                </span>
+              </div>
               <button
                 type="button"
-                onClick={handleExportExcelForActiveDate}
-                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-extrabold flex items-center gap-1.5 shadow-xs transition cursor-pointer active:scale-95"
-                title="Unduh Laporan Excel Tanggal Ini (.xlsx)"
+                onClick={() => {
+                  const link = document.createElement('a');
+                  link.href = previewPhoto.url;
+                  link.download = `foto_timbangan_${Date.now()}.jpg`;
+                  link.click();
+                }}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
               >
-                <FileSpreadsheet className="w-4 h-4" />
-                <span>Unduh Laporan Excel</span>
+                <Download className="w-3.5 h-3.5" />
+                <span>Simpan Foto</span>
               </button>
             </div>
-          </div>
-
-          {/* Rekap Sisa Stok Closing Fisik yang diinput Butcher */}
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-sm p-4 sm:p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
-              <div>
-                <h3 className="text-xs font-black text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                  <span>Rekap Sisa Stok Closing & Susut Jual ({activeClosingRecords.length} Rencana Terinput)</span>
-                </h3>
-                <p className="text-[11px] text-slate-500 font-medium">
-                  Data hasil penimbangan fisik sisa stok butcher pada tanggal {formattedActiveDate}.
-                </p>
-              </div>
-              <span className="text-[10px] font-bold px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-lg border border-emerald-200 self-start sm:self-auto">
-                Mode Paralel Aktif
-              </span>
-            </div>
-
-            {activeClosingRecords.length === 0 ? (
-              <div className="py-6 px-4 text-center bg-slate-50 rounded-2xl border border-dashed border-slate-200 text-slate-500 space-y-2">
-                <Scale className="w-6 h-6 mx-auto text-slate-400" />
-                <p className="text-xs font-bold text-slate-700">
-                  Belum ada rencana potong yang di-closing untuk periode ini.
-                </p>
-                <p className="text-[11px] text-slate-400 max-w-md mx-auto">
-                  Butcher dapat langsung menimbang dan menginput closing fisik di tab Closing Rencana Potong tanpa harus menunggu admin input sales.
-                </p>
-                {onNavigateToClosing && (
-                  <button
-                    type="button"
-                    onClick={onNavigateToClosing}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition shadow-xs cursor-pointer mt-1"
-                  >
-                    <span>Buka Closing Rencana Potong</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead>
-                      <tr className="border-b border-slate-200 text-[10px] font-black uppercase tracking-wider text-slate-500 bg-slate-50">
-                        <th className="py-2.5 px-3 rounded-l-xl">Rencana Potong</th>
-                        <th className="py-2.5 px-3 text-right">Stok Awal</th>
-                        <th className="py-2.5 px-3 text-right">Potong Baru</th>
-                        <th className="py-2.5 px-3 text-right">Sales Terjual</th>
-                        <th className="py-2.5 px-3 text-right">Stok Sistem</th>
-                        <th className="py-2.5 px-3 text-right text-emerald-800">Sisa Fisik</th>
-                        <th className="py-2.5 px-3 text-right text-rose-700">Susut Jual</th>
-                        <th className="py-2.5 px-3 text-center rounded-r-xl">Foto & Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {activeClosingRecords.map((rec) => {
-                        const hasSales = (rec.salesKg || 0) > 0;
-                        return (
-                          <tr key={rec.id} className="hover:bg-slate-50/60 transition">
-                            <td className="py-3 px-3">
-                              <span className="font-extrabold text-slate-900 block">{rec.planName}</span>
-                              <span className="text-[10px] text-slate-400 font-semibold">{rec.category || 'DAGING FRESH'}</span>
-                            </td>
-                            <td className="py-3 px-3 text-right font-mono font-semibold text-slate-600">
-                              {(rec.openingStockKg || 0).toFixed(2)} Kg
-                            </td>
-                            <td className="py-3 px-3 text-right font-mono font-semibold text-slate-600">
-                              {(rec.newProcessedKg || 0).toFixed(2)} Kg
-                            </td>
-                            <td className="py-3 px-3 text-right font-mono font-semibold text-blue-700">
-                              {(rec.salesKg || 0).toFixed(2)} Kg
-                            </td>
-                            <td className="py-3 px-3 text-right font-mono font-semibold text-slate-700">
-                              {(rec.closingStockBySystemKg || 0).toFixed(2)} Kg
-                            </td>
-                            <td className="py-3 px-3 text-right font-mono font-black text-emerald-700 bg-emerald-50/50 rounded-lg">
-                              {(rec.actualClosingStockKg ?? 0).toFixed(2)} Kg
-                            </td>
-                            <td className="py-3 px-3 text-right font-mono font-black text-rose-600">
-                              {(rec.susutJualKg || 0).toFixed(2)} Kg
-                            </td>
-                            <td className="py-3 px-3">
-                              <div className="flex items-center justify-center gap-1.5">
-                                {rec.photoUrl ? (
-                                  <button
-                                    type="button"
-                                    onClick={() => setPreviewPhoto({
-                                      id: rec.id,
-                                      url: rec.photoUrl!,
-                                      caption: `Foto Closing: ${rec.planName} (${(rec.actualClosingStockKg ?? 0).toFixed(2)} Kg)`,
-                                      category: 'Closing Stock',
-                                      uploadedAt: rec.timestamp,
-                                    })}
-                                    className="p-1 text-purple-700 hover:bg-purple-50 rounded-lg border border-purple-200 transition cursor-pointer"
-                                    title="Lihat Foto Timbangan"
-                                  >
-                                    <Eye className="w-3.5 h-3.5" />
-                                  </button>
-                                ) : (
-                                  <span className="text-[10px] text-slate-300">-</span>
-                                )}
-                                <span
-                                  className={`text-[9px] font-black px-1.5 py-0.5 rounded-md ${
-                                    hasSales
-                                      ? 'bg-blue-100 text-blue-800'
-                                      : 'bg-amber-100 text-amber-800'
-                                  }`}
-                                  title={hasSales ? 'Sales sudah tercatat' : 'Menunggu input sales admin'}
-                                >
-                                  {hasSales ? 'Sales OK' : 'Menunggu Sales'}
-                                </span>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-100 text-xs">
-                  <div className="p-2.5 bg-slate-50 rounded-xl">
-                    <span className="text-[10px] font-bold text-slate-400 block">Total Potong Baru</span>
-                    <span className="font-extrabold text-slate-800">
-                      {activeClosingRecords.reduce((sum, r) => sum + (r.newProcessedKg || 0), 0).toFixed(2)} Kg
-                    </span>
-                  </div>
-                  <div className="p-2.5 bg-blue-50/60 rounded-xl">
-                    <span className="text-[10px] font-bold text-blue-500 block">Total Sales Terjual</span>
-                    <span className="font-extrabold text-blue-800">
-                      {activeClosingRecords.reduce((sum, r) => sum + (r.salesKg || 0), 0).toFixed(2)} Kg
-                    </span>
-                  </div>
-                  <div className="p-2.5 bg-emerald-50 rounded-xl">
-                    <span className="text-[10px] font-bold text-emerald-600 block">Total Sisa Stok Fisik</span>
-                    <span className="font-black text-emerald-800">
-                      {activeClosingRecords.reduce((sum, r) => sum + (r.actualClosingStockKg || 0), 0).toFixed(2)} Kg
-                    </span>
-                  </div>
-                  <div className="p-2.5 bg-rose-50 rounded-xl">
-                    <span className="text-[10px] font-bold text-rose-500 block">Total Susut Jual</span>
-                    <span className="font-black text-rose-700">
-                      {activeClosingRecords.reduce((sum, r) => sum + (r.susutJualKg || 0), 0).toFixed(2)} Kg
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Photo Gallery Grid */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between px-1">
-              <h3 className="text-xs font-extrabold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
-                <Camera className="w-3.5 h-3.5 text-purple-600" />
-                Foto Yang Diinput ({currentPhotos.length} Foto)
-              </h3>
-              <span className="text-[11px] text-slate-500 font-medium">
-                *Rasio asli tidak terpotong (contain)
-              </span>
-            </div>
-
-            {currentPhotos.length === 0 ? (
-              <div className="p-12 text-center bg-white border border-slate-200 rounded-3xl text-slate-400 space-y-2">
-                <div className="p-3 bg-purple-50 text-purple-400 rounded-full inline-block">
-                  <ImageIcon className="w-8 h-8" />
-                </div>
-                <p className="text-xs font-black text-slate-700">
-                  Belum ada foto yang diinput pada periode {formattedActiveDate}.
-                </p>
-                <p className="text-[11px] text-slate-400 max-w-sm mx-auto">
-                  Foto yang diinput saat timbangan awal thawing atau penimbangan fisik closing akan otomatis ditampilkan di sini dengan keterangan lengkap.
-                </p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-                {currentPhotos.map((photo) => {
-                  const photoDateObj = photo.uploadedAt ? new Date(photo.uploadedAt) : null;
-                  const formattedDate = photoDateObj
-                    ? photoDateObj.toLocaleDateString('id-ID', {
-                        day: 'numeric',
-                        month: 'short',
-                        year: 'numeric',
-                      })
-                    : '-';
-                  const formattedTime = photoDateObj
-                    ? photoDateObj.toLocaleTimeString('id-ID', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })
-                    : '';
-
-                  const isTimbangan =
-                    photo.category === 'Timbangan' ||
-                    photo.caption.toLowerCase().includes('raw') ||
-                    photo.caption.toLowerCase().includes('thawing');
-
-                  return (
-                    <div
-                      key={photo.id}
-                      className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden flex flex-col justify-between hover:border-purple-300 hover:shadow-md transition-all group"
-                    >
-                      {/* Photo Frame (contain, uncropped) */}
-                      <div className="relative w-full h-56 bg-slate-950 flex items-center justify-center p-2 overflow-hidden">
-                        <img
-                          src={photo.url}
-                          alt={photo.caption}
-                          className="max-h-full max-w-full object-contain rounded-lg transition-transform duration-200 group-hover:scale-102"
-                          loading="lazy"
-                        />
-
-                        {/* Zoom Button */}
-                        <button
-                          type="button"
-                          onClick={() => setPreviewPhoto(photo)}
-                          className="absolute top-2.5 right-2.5 p-1.5 bg-black/60 hover:bg-black text-white rounded-lg transition cursor-pointer backdrop-blur-xs shadow-md"
-                          title="Perbesar Layar Penuh"
-                        >
-                          <Maximize2 className="w-3.5 h-3.5" />
-                        </button>
-
-                        {/* Category Tag */}
-                        <span
-                          className={`absolute top-2.5 left-2.5 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md backdrop-blur-xs flex items-center gap-1 border ${
-                            isTimbangan
-                              ? 'bg-amber-950/80 text-amber-300 border-amber-500/40'
-                              : 'bg-purple-950/80 text-purple-300 border-purple-500/40'
-                          }`}
-                        >
-                          {isTimbangan ? (
-                            <Scale className="w-2.5 h-2.5 text-amber-400" />
-                          ) : (
-                            <Tag className="w-2.5 h-2.5 text-purple-400" />
-                          )}
-                          {photo.category || (isTimbangan ? 'Timbangan' : 'Closing Stock')}
-                        </span>
-                      </div>
-
-                      {/* Metadata & Caption */}
-                      <div className="p-3.5 space-y-2.5 bg-white flex-1 flex flex-col justify-between">
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">
-                            <span className="flex items-center gap-1">
-                              <Calendar className="w-3 h-3 text-slate-400" />
-                              {formattedDate}
-                            </span>
-                            {formattedTime && (
-                              <span className="flex items-center gap-1">
-                                <Clock className="w-3 h-3" />
-                                {formattedTime}
-                              </span>
-                            )}
-                          </div>
-
-                          <p className="text-xs font-bold text-slate-900 leading-snug">
-                            {photo.caption}
-                          </p>
-                        </div>
-
-                        {/* Actions */}
-                        <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-1.5">
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              onClick={() => setPreviewPhoto(photo)}
-                              className="px-2.5 py-1 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-lg text-[11px] font-extrabold transition flex items-center gap-1 cursor-pointer"
-                            >
-                              <Maximize2 className="w-3 h-3" /> Zoom
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDownloadPhoto(photo)}
-                              className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer"
-                              title="Unduh foto"
-                            >
-                              <Download className="w-3 h-3" /> Unduh
-                            </button>
-                          </div>
-
-                          <button
-                            type="button"
-                            onClick={() => handleDeletePhoto(photo.id)}
-                            className="p-1 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition cursor-pointer"
-                            title="Hapus foto dari tampilan"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Lightbox Zoom Modal (Uncropped Fullscreen View) */}
-      {previewPhoto && (
-        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex flex-col items-center justify-between p-4 md:p-6 animate-in fade-in duration-150">
-          <div className="w-full max-w-5xl flex items-center justify-between text-white pb-3 border-b border-white/10">
-            <div className="flex items-center gap-2.5">
-              <span className="text-[10px] font-black uppercase bg-purple-600 text-white px-2.5 py-1 rounded-md">
-                {previewPhoto.category || 'Dokumentasi'}
-              </span>
-              <h3 className="text-xs md:text-sm font-bold text-white truncate max-w-xl">
-                {previewPhoto.caption}
-              </h3>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => handleDownloadPhoto(previewPhoto)}
-                className="p-2 bg-white/10 hover:bg-white/20 text-white rounded-xl transition cursor-pointer flex items-center gap-1.5 text-xs font-bold"
-                title="Download Foto"
-              >
-                <Download className="w-4 h-4" />
-                <span className="hidden sm:inline">Unduh</span>
-              </button>
-              <button
-                onClick={() => setPreviewPhoto(null)}
-                className="p-2 bg-white/10 hover:bg-rose-600 text-white rounded-xl transition cursor-pointer"
-                title="Tutup Preview"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
-
-          {/* Uncropped Full View */}
-          <div className="my-auto max-w-5xl max-h-[75vh] w-full flex items-center justify-center p-2">
-            <img
-              src={previewPhoto.url}
-              alt={previewPhoto.caption}
-              className="max-h-[72vh] max-w-full object-contain rounded-2xl shadow-2xl border border-white/10"
-            />
-          </div>
-
-          <div className="w-full max-w-5xl text-center text-slate-400 text-xs pt-3 border-t border-white/10 flex items-center justify-between">
-            <span>
-              {previewPhoto.uploadedAt
-                ? new Date(previewPhoto.uploadedAt).toLocaleDateString('id-ID', {
-                    weekday: 'long',
-                    day: 'numeric',
-                    month: 'long',
-                    year: 'numeric',
-                  })
-                : ''}
-            </span>
-            <span className="text-[11px] text-slate-500">
-              *Foto resolusi penuh tanpa terpotong.
-            </span>
           </div>
         </div>
       )}

@@ -89,7 +89,7 @@ export default function AntrianPabrikasi({
     { name: 'Daging Sapi Tenderloin (Has Dalam)', brand: 'Santori', code: 'DGS-05', category: 'DAGING PREMIUM', plan: 'STEAK TENDERLOIN' },
     { name: 'Daging Sapi Iga (Short Ribs)', brand: 'Lokal', code: 'DGS-06', category: 'DAGING FRESH', plan: 'SUP IGA' },
     { name: 'Daging Sapi Tetelan (Rawon / Trim)', brand: 'Lokal', code: 'DGS-07', category: 'RAWON', plan: 'RAWON / SUP' },
-    { name: 'Daging Ayam Utuh (Broiler)', brand: 'Wonokoyo', code: 'AYM-01', category: 'PARTING AYAM', plan: 'PARTING AYAM' },
+    { name: 'Daging Sapi Giling (Minced Beef)', brand: 'Lokal', code: 'DGS-08', category: 'DAGING FRESH', plan: 'DAGING GILING' },
   ];
 
   const handleAddSubmit = (e: React.FormEvent) => {
@@ -307,8 +307,8 @@ export default function AntrianPabrikasi({
                         <span>Operator: <strong className="text-slate-700">{item.butcherName}</strong></span>
                       </div>
                       <div className="flex flex-wrap items-center gap-1.5 mt-2">
-                        <span className="text-[11px] bg-red-50 text-red-700 font-bold px-2 py-0.5 rounded-md inline-block border border-red-200">
-                          🏬 {item.storeName || (item.storeId === '1' ? 'TDN CKR' : item.storeId) || 'TDN CKR'}
+                        <span className="text-[11px] bg-slate-50 text-slate-700 font-bold px-2 py-0.5 rounded-md inline-block border border-slate-200">
+                          Facility Hub: {item.storeName || 'Central Hub'}
                         </span>
                         <span className="text-xs bg-slate-100 text-slate-600 font-medium px-2 py-1 rounded-md inline-block">
                           📋 Rencana: {item.plannedFabrication || 'PENDING'}

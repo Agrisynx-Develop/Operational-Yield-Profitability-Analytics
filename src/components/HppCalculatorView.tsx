@@ -73,22 +73,22 @@ export default function HppCalculatorView({ items, currentStore }: HppCalculator
       setBrandInput(meat.defaultBrand || 'Lokal');
       setItemCodeInput(meat.code || `DGS-0${index + 1}`);
 
-      // Set perkiraan harga beli awal yang realistis
-      if (meat.category === 'DAGING PREMIUM') {
-        setPurchasePriceInput('130000');
-        setPreviousSellingPriceInput('165000');
-      } else if (meat.category === 'PARTING AYAM') {
-        setPurchasePriceInput('38000');
-        setPreviousSellingPriceInput('48000');
-      } else if (meat.category === 'FILLET DORI') {
-        setPurchasePriceInput('48000');
-        setPreviousSellingPriceInput('62000');
-      } else if (meat.category === 'SOSIS & KENTANG') {
-        setPurchasePriceInput('35000');
-        setPreviousSellingPriceInput('45000');
-      } else {
+      // Set perkiraan harga beli awal yang realistis berdasarkan kategori potong
+      if (meat.cutCategory === 'Prime Cuts' || meat.category === 'Prime Cuts') {
+        setPurchasePriceInput('145000');
+        setPreviousSellingPriceInput('175000');
+      } else if (meat.cutCategory === 'Secondary Cuts' || meat.category === 'Secondary Cuts') {
+        setPurchasePriceInput('105000');
+        setPreviousSellingPriceInput('125000');
+      } else if (meat.cutCategory === 'Tertiary Cuts' || meat.category === 'Tertiary Cuts') {
         setPurchasePriceInput('95000');
-        setPreviousSellingPriceInput('120000');
+        setPreviousSellingPriceInput('115000');
+      } else if (meat.cutCategory === 'Trimming' || meat.category === 'Trimming') {
+        setPurchasePriceInput('70000');
+        setPreviousSellingPriceInput('90000');
+      } else {
+        setPurchasePriceInput('100000');
+        setPreviousSellingPriceInput('125000');
       }
     }
   };
@@ -131,7 +131,7 @@ export default function HppCalculatorView({ items, currentStore }: HppCalculator
     const newRecord: HppPricingRecord = {
       id: `hpp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       storeId: currentStore?.id || '1',
-      storeName: currentStore?.name || 'TDN CKR',
+      storeName: currentStore?.name || 'Operational Processing Hub',
       itemCode: itemCodeInput || 'DGS-01',
       itemName: activeMeatName,
       brand: brandInput || 'Lokal',

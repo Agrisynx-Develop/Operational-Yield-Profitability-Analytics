@@ -1,9 +1,9 @@
 import { Store } from '../types';
 
 /**
- * Matches an entity's store identifier against a target Store.
- * Supports store IDs ('1', 'store_ckr'), store codes ('CKR', 'ckr'),
- * store names ('TDN CKR', 'tdn ckr'), and handles untagged entities gracefully.
+ * Matches an entity's store identifier against a target facility or processing hub.
+ * Supports facility IDs ('1', 'hub'), facility codes ('HUB'),
+ * and handles untagged entities gracefully.
  */
 export function matchStoreEntity(
   entityStoreId: any,
@@ -56,9 +56,9 @@ export function getEffectiveStore(
   if (stores.length === 0) {
     return {
       id: '1',
-      code: 'CKR',
-      name: 'TDN CKR',
-      city: 'Cikarang',
+      code: 'HUB',
+      name: 'Operational Processing Hub',
+      city: 'Central Facility',
       createdAt: '2026-01-01',
     };
   }
